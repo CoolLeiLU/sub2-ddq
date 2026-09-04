@@ -42,6 +42,7 @@ class AccountDispatchState:
     schedulable: bool | None = None
     expired: bool = False
     temporary_unavailable: bool = False
+    automatic_pause: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +57,7 @@ class AccountSchedulingState:
     effective_load_factor: int | None = None
     expired: bool = False
     temporary_unavailable: bool = False
+    automatic_pause: bool = False
 
 
 @dataclass(frozen=True, slots=True)

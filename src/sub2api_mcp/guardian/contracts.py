@@ -96,6 +96,7 @@ class GuardianAccountTestOutcome(StrictModel):
     attempted: bool = False
     observed_status: GuardianAccountStatus | None = None
     observed_schedulable: bool | None = None
+    observed_automatic_pause: bool = False
 
 
 class GuardianAccountMutationOutcome(StrictModel):
@@ -116,6 +117,7 @@ class GuardianAccountSchedulingState(StrictModel):
     effective_load_factor: int | None = Field(default=None, ge=1, le=1_000_000)
     expired: bool = False
     temporary_unavailable: bool = False
+    automatic_pause: bool = False
 
     @model_validator(mode="after")
     def validate_successful_scheduling_state(self) -> GuardianAccountSchedulingState:

@@ -67,6 +67,8 @@ def _classification(
         account.status is GuardianAccountStatus.ACTIVE
         and not account.schedulable
     ):
+        if account.automatic_pause:
+            return AccountRecoveryClassification.UPSTREAM_ERROR, "automatic_pause"
         return AccountRecoveryClassification.MANUAL_PAUSE, "manual_pause"
     if account.account_id in quarantined_account_ids:
         return AccountRecoveryClassification.SYSTEM_QUARANTINE, "system_quarantine"
@@ -147,11 +149,21 @@ def select_account_recovery_candidates(
             # BAD_ACCOUNT_STATE/CHANNEL_ERROR paths below, where the test is
             # useful even though the account-level write must be withheld.
             selected = (
-                classification is AccountRecoveryClassification.AVAILABLE
+                (
+                    classification is AccountRecoveryClassification.AVAILABLE
+                    or (
+                        classification is AccountRecoveryClassification.UPSTREAM_ERROR
+                        and account.automatic_pause
+                    )
+                )
                 and writeback_allowed
             )
             if selected:
-                reason = "hourly_active_check"
+                reason = (
+                    "hourly_auto_pause"
+                    if classification is AccountRecoveryClassification.UPSTREAM_ERROR
+                    else "hourly_active_check"
+                )
         elif channel_scope:
             selected = True
             reason = (
@@ -468,6 +480,8 @@ class AccountRecoveryExecutor:
         if (
             trigger is AccountRecoveryRunTrigger.HOURLY_ACTIVE_CHECK
             and tested.result is AccountTestExecutionResult.SUCCESS
+            and initial_account.status is GuardianAccountStatus.ACTIVE
+            and initial_account.schedulable
         ):
             return (
                 AccountRecoveryResult.ENABLED,

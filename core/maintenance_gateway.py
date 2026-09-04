@@ -131,6 +131,56 @@ def _parse_external_datetime(value: Any, field: str) -> datetime:
     return parsed.astimezone(UTC)
 
 
+def _has_external_datetime(value: Any, field: str) -> bool:
+    """Validate a nullable Sub2API timestamp and report whether it exists."""
+
+    if value is None or value == "":
+        return False
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if value < 0:
+            raise MonitorDataError(f"invalid {field}")
+        return True
+    _parse_external_datetime(value, field)
+    return True
+
+
+def _automatic_pause_from_account_data(
+    data: dict[str, Any],
+    *,
+    status: str,
+    schedulable: bool,
+) -> bool:
+    """Return a provenance bit for Sub2API's automatic protection state.
+
+    The public API intentionally does not expose a single ``pause_source``
+    field.  These are the server-maintained fields written by rate-limit,
+    overload, temporary-unschedulable, and error-recovery paths.  We retain
+    only a boolean and never copy their contents into Guardian records.
+    """
+
+    if status != "active" or schedulable:
+        return False
+    if any(
+        _has_external_datetime(data.get(field), field)
+        for field in (
+            "rate_limited_at",
+            "rate_limit_reset_at",
+            "overload_until",
+            "temp_unschedulable_until",
+        )
+    ):
+        return True
+    for field in ("temp_unschedulable_reason", "error_message"):
+        value = data.get(field)
+        if value is None or value == "":
+            continue
+        if not isinstance(value, str) or len(value) > 200:
+            raise MonitorDataError(f"invalid {field}")
+        if value.strip():
+            return True
+    return False
+
+
 def _parse_admin_items_page(
     payload: Any,
     *,
@@ -481,6 +531,11 @@ class MaintenanceApiAdapter:
                 schedulable, bool
             ):
                 raise MonitorDataError("account dispatch state is invalid")
+            automatic_pause = _automatic_pause_from_account_data(
+                data,
+                status=status,
+                schedulable=schedulable,
+            )
         except (MonitorRequestError, MonitorDataError):
             return AccountDispatchState(normalized_id, success=False)
         return AccountDispatchState(
@@ -490,6 +545,7 @@ class MaintenanceApiAdapter:
             schedulable=schedulable,
             expired=expired,
             temporary_unavailable=temporary_unavailable,
+            automatic_pause=automatic_pause,
         )
 
     async def fetch_account_dispatch_state(
@@ -579,6 +635,11 @@ class MaintenanceApiAdapter:
                 if load_factor is not None and load_factor > 0
                 else max(1, concurrency)
             )
+            automatic_pause = _automatic_pause_from_account_data(
+                data,
+                status=status,
+                schedulable=schedulable,
+            )
         except (MonitorRequestError, MonitorDataError):
             return AccountSchedulingState(normalized_id, success=False)
         return AccountSchedulingState(
@@ -592,6 +653,7 @@ class MaintenanceApiAdapter:
             effective_load_factor=effective_load_factor,
             expired=expired,
             temporary_unavailable=temporary_unavailable,
+            automatic_pause=automatic_pause,
         )
 
     async def fetch_account_scheduling_state(

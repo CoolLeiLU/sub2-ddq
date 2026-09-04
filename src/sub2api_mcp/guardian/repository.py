@@ -41,7 +41,7 @@ from .contracts import (
     UpstreamProbeSnapshot,
 )
 
-GUARDIAN_SCHEMA_VERSION = 8
+GUARDIAN_SCHEMA_VERSION = 9
 
 GUARDIAN_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS guardian_metadata (
@@ -224,6 +224,7 @@ CREATE TABLE IF NOT EXISTS guardian_account_observations (
     schedulable INTEGER NOT NULL CHECK (schedulable IN (0, 1)),
     expired INTEGER NOT NULL CHECK (expired IN (0, 1)),
     temporary_unavailable INTEGER NOT NULL CHECK (temporary_unavailable IN (0, 1)),
+    automatic_pause INTEGER NOT NULL DEFAULT 0 CHECK (automatic_pause IN (0, 1)),
     observed_at TEXT NOT NULL,
     PRIMARY KEY(snapshot_id, account_id)
 );
@@ -408,6 +409,8 @@ class GuardianRepository:
                 self._migrate_v6_to_v7_sync(connection)
             if current_version < 8:
                 self._migrate_v7_to_v8_sync(connection, now=now)
+            if current_version < 9:
+                self._migrate_v8_to_v9_sync(connection)
             connection.execute(
                 "INSERT INTO guardian_metadata(key, value) VALUES('schema_version', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -725,6 +728,17 @@ class GuardianRepository:
             "UPDATE guardian_policy SET policy_json = ?, revision = ?, updated_at = ? "
             "WHERE singleton = 1",
             (_json(raw_policy), revision, now),
+        )
+
+    @staticmethod
+    def _migrate_v8_to_v9_sync(connection: sqlite3.Connection) -> None:
+        """Add account pause provenance without rewriting historical snapshots."""
+
+        GuardianRepository._ensure_column_sync(
+            connection,
+            "guardian_account_observations",
+            "automatic_pause",
+            "INTEGER NOT NULL DEFAULT 0 CHECK (automatic_pause IN (0, 1))",
         )
 
     @staticmethod
@@ -1190,6 +1204,12 @@ class GuardianRepository:
         try:
             connection.execute("BEGIN IMMEDIATE")
             for observation in observations:
+                observation = self._normalize_account_observation_sync(
+                    connection,
+                    observation,
+                    snapshot_id=normalized_snapshot_id,
+                    observed_at=observed_at,
+                )
                 existing = connection.execute(
                     "SELECT * FROM guardian_account_observations "
                     "WHERE snapshot_id = ? AND account_id = ?",
@@ -1207,8 +1227,8 @@ class GuardianRepository:
                 connection.execute(
                     "INSERT INTO guardian_account_observations("
                     "snapshot_id, account_id, group_ids_json, status, schedulable, "
-                    "expired, temporary_unavailable, observed_at"
-                    ") VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+                    "expired, temporary_unavailable, automatic_pause, observed_at"
+                    ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         normalized_snapshot_id,
                         observation.account_id,
@@ -1217,6 +1237,7 @@ class GuardianRepository:
                         int(observation.schedulable),
                         int(observation.expired),
                         int(observation.temporary_unavailable),
+                        int(observation.automatic_pause),
                         _iso(observed_at),
                     ),
                 )
@@ -1229,6 +1250,53 @@ class GuardianRepository:
         finally:
             connection.close()
         return inserted
+
+    @staticmethod
+    def _normalize_account_observation_sync(
+        connection: sqlite3.Connection,
+        observation: GuardianAccountObservation,
+        *,
+        snapshot_id: str,
+        observed_at: datetime,
+    ) -> GuardianAccountObservation:
+        """Infer automatic pause provenance only from safe local evidence.
+
+        Sub2API versions before the provenance fields were introduced expose
+        ``active + schedulable=false`` for both human pauses and automatic
+        protection.  An explicit adapter marker wins.  Otherwise we retain a
+        marker only when a recent snapshot for the same account was in the
+        upstream ``error`` state or was already identified as automatic.  A
+        first-seen, unannotated pause remains protected as a manual pause.
+        """
+
+        if (
+            observation.status.value != "active"
+            or observation.schedulable
+            or observation.automatic_pause
+        ):
+            return observation
+        row = connection.execute(
+            "SELECT status, automatic_pause, observed_at "
+            "FROM guardian_account_observations "
+            "WHERE account_id = ? AND snapshot_id <> ? "
+            "ORDER BY observed_at DESC, snapshot_id DESC LIMIT 1",
+            (observation.account_id, snapshot_id),
+        ).fetchone()
+        if row is None:
+            return observation
+        previous_at = _dt(row["observed_at"])
+        current_at = observed_at.astimezone(UTC)
+        if previous_at is None:
+            return observation
+        age_seconds = (current_at - previous_at.astimezone(UTC)).total_seconds()
+        # Retention keeps account observations for two days.  Do not let an
+        # ancient error turn a newly created human pause into an auto-owned
+        # account after the evidence has aged out.
+        if age_seconds < 0 or age_seconds > 2 * 24 * 60 * 60:
+            return observation
+        if bool(row["automatic_pause"]) or row["status"] == "error":
+            return observation.model_copy(update={"automatic_pause": True})
+        return observation
 
     async def list_account_observations(
         self,
@@ -1263,9 +1331,14 @@ class GuardianRepository:
                 ") SELECT observations.snapshot_id "
                 "FROM guardian_account_observations AS observations "
                 "JOIN latest ON latest.snapshot_id = observations.snapshot_id "
-                "WHERE observations.status IN ('error', 'disabled', 'inactive') "
+                "WHERE ((observations.status IN ('error', 'disabled', 'inactive') "
                 "AND observations.expired = 0 "
-                "AND observations.temporary_unavailable = 0 LIMIT 1"
+                "AND observations.temporary_unavailable = 0) "
+                "OR (observations.status = 'active' "
+                "AND observations.schedulable = 0 "
+                "AND observations.automatic_pause = 1 "
+                "AND observations.expired = 0 "
+                "AND observations.temporary_unavailable = 0)) LIMIT 1"
             ).fetchone()
         return cast(str, row["snapshot_id"]) if row is not None else None
 
@@ -3204,6 +3277,7 @@ class GuardianRepository:
         row: sqlite3.Row,
     ) -> GuardianAccountObservation:
         try:
+            row_keys = row.keys()
             return GuardianAccountObservation.model_validate(
                 {
                     "account_id": row["account_id"],
@@ -3212,6 +3286,11 @@ class GuardianRepository:
                     "schedulable": bool(row["schedulable"]),
                     "expired": bool(row["expired"]),
                     "temporary_unavailable": bool(row["temporary_unavailable"]),
+                    "automatic_pause": (
+                        bool(row["automatic_pause"])
+                        if "automatic_pause" in row_keys
+                        else False
+                    ),
                 }
             )
         except (ValidationError, ValueError, TypeError, json.JSONDecodeError) as exc:

@@ -158,6 +158,8 @@ class AccountGroupState:
     status: str = ""
     schedulable: bool = False
     expired: bool = False
+    temporary_unavailable: bool = False
+    automatic_pause: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -394,6 +396,31 @@ def _future_timestamp(value: Any, field: str, now: datetime) -> bool:
     return parsed > now.astimezone(parsed.tzinfo)
 
 
+def _present_timestamp(value: Any, field: str) -> bool:
+    """Validate an optional timestamp and report whether it is populated.
+
+    A past ``rate_limited_at`` is still useful provenance: Sub2API may retain
+    the timestamp after the reset deadline has elapsed.  We deliberately keep
+    only the boolean result and never persist the upstream value itself.
+    """
+
+    if value is None:
+        return False
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if value < 0:
+            raise MonitorDataError(f"invalid {field}")
+        return True
+    if not isinstance(value, str) or len(value) > 100:
+        raise MonitorDataError(f"invalid {field}")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise MonitorDataError(f"invalid {field}") from exc
+    if parsed.tzinfo is None:
+        raise MonitorDataError(f"invalid {field}")
+    return True
+
+
 def parse_group_definitions(payload: Any) -> list[GroupDefinition]:
     if not isinstance(payload, dict) or payload.get("code") != 0:
         raise MonitorDataError("Sub2API group request failed")
@@ -563,6 +590,25 @@ def parse_account_group_state_page(
                 "temp_unschedulable_until",
             )
         )
+        automatic_pause = False
+        if status == "active" and not schedulable:
+            # These fields are written by Sub2API's automatic protection
+            # paths.  ``rate_limited_at`` is checked for presence (rather
+            # than only being in the future) because the reset timestamp can
+            # be retained after the account becomes eligible again.
+            automatic_pause = (
+                _present_timestamp(item.get("rate_limited_at"), "rate_limited_at")
+                or _present_timestamp(
+                    item.get("rate_limit_reset_at"), "rate_limit_reset_at"
+                )
+                or _present_timestamp(item.get("overload_until"), "overload_until")
+                or _present_timestamp(
+                    item.get("temp_unschedulable_until"),
+                    "temp_unschedulable_until",
+                )
+                or bool(str(item.get("temp_unschedulable_reason") or "").strip())
+                or bool(str(item.get("error_message") or "").strip())
+            )
         if status == "error":
             bucket = "error"
         elif status == "active" and schedulable and not is_expired:
@@ -578,6 +624,8 @@ def parse_account_group_state_page(
                 status=status,
                 schedulable=schedulable,
                 expired=is_expired,
+                temporary_unavailable=is_temporary,
+                automatic_pause=automatic_pause,
             )
         )
     return states, pages

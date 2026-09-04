@@ -139,7 +139,8 @@ class LegacySub2APIAdapter:
                     status=AccountObservationStatus(account.status),
                     schedulable=account.schedulable,
                     expired=account.expired,
-                    temporary_unavailable=account.bucket == "temporary",
+                    temporary_unavailable=account.temporary_unavailable,
+                    automatic_pause=account.automatic_pause,
                 )
                 for account in sorted(accounts, key=lambda item: int(item.account_id))
             ),
@@ -165,12 +166,16 @@ class LegacySub2APIAdapter:
     def _guardian_account_block_reason(state: AccountDispatchState) -> str | None:
         if not state.success:
             return "account_state_unavailable"
-        if state.status == "active" and state.schedulable is False:
-            return "manual_pause"
         if state.expired:
             return "expired"
         if state.temporary_unavailable:
             return "temporary_unavailable"
+        if (
+            state.status == "active"
+            and state.schedulable is False
+            and not state.automatic_pause
+        ):
+            return "manual_pause"
         return None
 
     def _monitor_model_for_account(
@@ -230,6 +235,7 @@ class LegacySub2APIAdapter:
         initial_is_manual_pause = (
             initial_account.status is GuardianAccountStatus.ACTIVE
             and initial_account.schedulable is False
+            and not initial_account.automatic_pause
         )
         if initial_is_manual_pause:
             return GuardianAccountTestOutcome(
@@ -238,6 +244,7 @@ class LegacySub2APIAdapter:
                 reason="manual_pause",
                 observed_status=initial_account.status,
                 observed_schedulable=initial_account.schedulable,
+                observed_automatic_pause=initial_account.automatic_pause,
             )
         if initial_account.expired or initial_account.temporary_unavailable:
             return GuardianAccountTestOutcome(
@@ -250,6 +257,7 @@ class LegacySub2APIAdapter:
                 ),
                 observed_status=initial_account.status,
                 observed_schedulable=initial_account.schedulable,
+                observed_automatic_pause=initial_account.automatic_pause,
             )
         state = await self._client.fetch_account_dispatch_state(account_id)
         blocked = (
@@ -267,6 +275,11 @@ class LegacySub2APIAdapter:
             }
         ):
             blocked = None
+        if blocked == "manual_pause" and initial_account.automatic_pause:
+            # Some Sub2API versions expose the automatic reason on the list
+            # endpoint but omit it from the single-account readback.  Keep the
+            # provenance from the canonical snapshot in that case.
+            blocked = None
         if (
             blocked == "account_state_unavailable"
             and initial_account.status is not GuardianAccountStatus.ACTIVE
@@ -283,6 +296,8 @@ class LegacySub2APIAdapter:
                 reason=blocked,
                 observed_status=initial_account.status,
                 observed_schedulable=initial_account.schedulable,
+                observed_automatic_pause=initial_account.automatic_pause
+                or state.automatic_pause,
             )
         model_id = model_id.strip()
         if not model_id:
@@ -313,6 +328,8 @@ class LegacySub2APIAdapter:
             attempted=True,
             observed_status=initial_account.status,
             observed_schedulable=initial_account.schedulable,
+            observed_automatic_pause=initial_account.automatic_pause
+            or state.automatic_pause,
         )
 
     async def guardian_enable_account(
@@ -334,6 +351,7 @@ class LegacySub2APIAdapter:
         if (
             tested.observed_status is GuardianAccountStatus.ACTIVE
             and tested.observed_schedulable is False
+            and not tested.observed_automatic_pause
         ):
             return GuardianAccountMutationOutcome(
                 account_id=account_id,
@@ -348,7 +366,15 @@ class LegacySub2APIAdapter:
             )
         state = await self._client.fetch_account_dispatch_state(account_id)
         blocked = self._guardian_account_block_reason(state)
-        if blocked == "manual_pause":
+        if blocked == "manual_pause" and (
+            tested.observed_automatic_pause
+            or tested.observed_status
+            in {
+                GuardianAccountStatus.ERROR,
+                GuardianAccountStatus.DISABLED,
+                GuardianAccountStatus.INACTIVE,
+            }
+        ):
             blocked = None
         if blocked is not None:
             return GuardianAccountMutationOutcome(
@@ -391,6 +417,20 @@ class LegacySub2APIAdapter:
     ) -> GuardianAccountMutationOutcome:
         state = await self._client.fetch_account_dispatch_state(account_id)
         blocked = self._guardian_account_block_reason(state)
+        if (
+            state.success
+            and state.status == "active"
+            and state.schedulable is False
+            and state.automatic_pause
+        ):
+            # A failed probe must not convert an upstream automatic pause into
+            # a permanent inactive state.  Leave Sub2API's protection intact
+            # and let the next hourly pass try again.
+            return GuardianAccountMutationOutcome(
+                account_id=account_id,
+                result=AccountMutationResult.BLOCKED,
+                reason="automatic_pause_preserved",
+            )
         if blocked is not None:
             return GuardianAccountMutationOutcome(
                 account_id=account_id,
@@ -464,6 +504,7 @@ class LegacySub2APIAdapter:
             effective_load_factor=state.effective_load_factor,
             expired=state.expired,
             temporary_unavailable=state.temporary_unavailable,
+            automatic_pause=state.automatic_pause,
         )
 
     @staticmethod

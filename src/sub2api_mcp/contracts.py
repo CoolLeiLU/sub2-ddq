@@ -439,6 +439,13 @@ class AccountObservation(StrictModel):
     schedulable: bool
     expired: bool = False
     temporary_unavailable: bool = False
+    # ``schedulable=false`` is ambiguous in Sub2API: it can be an explicit
+    # human pause or an automatic protection applied after an upstream error,
+    # rate limit, or overload.  Adapters set this provenance bit only when the
+    # upstream metadata (or a previously observed error transition) supports
+    # the automatic interpretation.  A missing/false value remains fail-safe
+    # and is treated as a human pause by Guardian.
+    automatic_pause: bool = False
 
     @field_validator("group_ids")
     @classmethod
