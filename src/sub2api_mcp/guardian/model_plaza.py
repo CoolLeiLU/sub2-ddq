@@ -5,7 +5,9 @@ channel's ``model_mapping``.  On the configured daily slots Guardian probes
 the upstream model catalog of every usable account in each monitored group
 (via ``GET /admin/accounts/{id}/models`` — a cheap catalog call, not a
 token-consuming chat test) and rewrites that mapping so the plaza only
-shows models that can actually be served.
+shows models that are both **configured on this platform** (the group's
+``model_allowlist`` + ``model_pricing`` entries) and **actually servable**
+right now.
 
 Write guards:
 
@@ -105,7 +107,8 @@ def usable_account_ids(
 
 def channel_model_plan(
     channels: list[AdminChannelSummary],
-    group_models: dict[str, set[str]],
+    group_probed: dict[str, set[str]],
+    group_desired: dict[str, set[str]],
     monitored_group_ids: frozenset[str],
 ) -> list[dict[str, Any]]:
     """Decide each channel's desired model_mapping without performing I/O."""
@@ -133,12 +136,14 @@ def channel_model_plan(
                 entry["reason"] = "ambiguous_platform"
             else:
                 probed: set[str] = set()
+                desired_models: set[str] = set()
                 for group_id in target_groups:
-                    probed |= group_models.get(group_id, set())
-                models = sorted(probed)
-                if not models:
+                    probed |= group_probed.get(group_id, set())
+                    desired_models |= group_desired.get(group_id, set())
+                if not probed:
                     entry["reason"] = "empty_probe"
                 else:
+                    models = sorted(desired_models)
                     platform = next(iter(channel.model_mapping))
                     existing: dict[str, str] = channel.model_mapping[platform]
                     desired = {model: existing.get(model, model) for model in models}
@@ -225,12 +230,22 @@ class ModelPlazaRefresher:
                 )
             except Exception:
                 failed_accounts.append(account_id)
-        group_models: dict[str, set[str]] = {}
+        groups = {
+            group.group_id: group
+            for group in await self._operations.guardian_list_groups()
+        }
+        group_probed: dict[str, set[str]] = {}
+        group_desired: dict[str, set[str]] = {}
         for group_id, account_ids in usable.items():
             models: set[str] = set()
             for account_id in account_ids:
                 models |= account_models.get(account_id, set())
-            group_models[group_id] = models
+            group_probed[group_id] = models
+            meta = groups.get(group_id)
+            configured: set[str] = (
+                set(meta.configured_models) if meta is not None else set()
+            )
+            group_desired[group_id] = models & configured
         channels = await self._operations.guardian_list_channels()
         bound_group_ids = {
             group_id for channel in channels for group_id in channel.group_ids
@@ -240,71 +255,71 @@ class ModelPlazaRefresher:
             key=int,
         )
         created: list[dict[str, Any]] = []
-        if unbound:
-            groups = {
-                group.group_id: group
-                for group in await self._operations.guardian_list_groups()
+        for group_id in unbound:
+            entry: dict[str, Any] = {
+                "group_id": group_id,
+                "updated": False,
+                "reason": "",
+                "models": [],
             }
-            for group_id in unbound:
-                entry: dict[str, Any] = {
-                    "group_id": group_id,
-                    "updated": False,
-                    "reason": "",
-                    "models": [],
-                }
-                meta = groups.get(group_id)
-                probed_models = sorted(group_models.get(group_id, set()))
-                if meta is None or meta.status != "active":
-                    entry["reason"] = "group_inactive"
-                elif not probed_models:
-                    entry["reason"] = "empty_probe"
-                else:
-                    desired = {model: model for model in probed_models}
-                    orphan = next(
-                        (
-                            channel
-                            for channel in channels
-                            if channel.name == meta.name
-                            and not any(
-                                bound in groups for bound in channel.group_ids
-                            )
-                        ),
-                        None,
-                    )
-                    try:
-                        if orphan is not None:
-                            await self._operations.guardian_rebind_channel(
-                                orphan.channel_id,
+            meta = groups.get(group_id)
+            desired_models = sorted(group_desired.get(group_id, set()))
+            if meta is None or meta.status != "active":
+                entry["reason"] = "group_inactive"
+            elif not group_probed.get(group_id):
+                entry["reason"] = "empty_probe"
+            elif not desired_models:
+                entry["reason"] = "no_configured_models"
+            else:
+                desired = {model: model for model in desired_models}
+                orphan = next(
+                    (
+                        channel
+                        for channel in channels
+                        if channel.name == meta.name
+                        and not any(bound in groups for bound in channel.group_ids)
+                    ),
+                    None,
+                )
+                try:
+                    if orphan is not None:
+                        await self._operations.guardian_rebind_channel(
+                            orphan.channel_id,
+                            group_ids=[group_id],
+                            model_mapping={meta.platform: desired},
+                        )
+                        entry["channel_id"] = orphan.channel_id
+                    else:
+                        entry["channel_id"] = (
+                            await self._operations.guardian_create_channel(
+                                name=meta.name,
                                 group_ids=[group_id],
                                 model_mapping={meta.platform: desired},
                             )
-                            entry["channel_id"] = orphan.channel_id
-                        else:
-                            entry["channel_id"] = (
-                                await self._operations.guardian_create_channel(
-                                    name=meta.name,
-                                    group_ids=[group_id],
-                                    model_mapping={meta.platform: desired},
-                                )
-                            )
-                    except Exception:
-                        entry["reason"] = "create_failed"
-                    else:
-                        entry.update(
-                            {
-                                "updated": True,
-                                "reason": (
-                                    "rebound" if orphan is not None else "created"
-                                ),
-                                "name": meta.name,
-                                "platform": meta.platform,
-                                "models": probed_models,
-                                "added": probed_models,
-                                "removed": [],
-                            }
                         )
-                created.append(entry)
-        plan = channel_model_plan(channels, group_models, monitored_group_ids)
+                except Exception:
+                    entry["reason"] = "create_failed"
+                else:
+                    entry.update(
+                        {
+                            "updated": True,
+                            "reason": (
+                                "rebound" if orphan is not None else "created"
+                            ),
+                            "name": meta.name,
+                            "platform": meta.platform,
+                            "models": desired_models,
+                            "added": desired_models,
+                            "removed": [],
+                        }
+                    )
+            created.append(entry)
+        plan = channel_model_plan(
+            channels,
+            group_probed,
+            group_desired,
+            monitored_group_ids,
+        )
         for entry in plan:
             if not entry["updated"]:
                 continue
@@ -321,7 +336,7 @@ class ModelPlazaRefresher:
             "groups": {
                 group_id: sorted(models)
                 for group_id, models in sorted(
-                    group_models.items(), key=lambda item: int(item[0])
+                    group_desired.items(), key=lambda item: int(item[0])
                 )
             },
             "accounts_probed": len(account_models),

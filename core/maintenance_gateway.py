@@ -301,6 +301,7 @@ class AdminGroupSummary:
     name: str
     platform: str
     status: str
+    configured_models: tuple[str, ...] = ()
 
 
 class MaintenanceApiAdapter:
@@ -727,12 +728,36 @@ class MaintenanceApiAdapter:
                 or not status.strip()
             ):
                 raise MonitorDataError("group record is invalid")
+            configured: set[str] = set()
+            allowlist = item.get("model_allowlist")
+            if allowlist is not None:
+                if not isinstance(allowlist, dict):
+                    raise MonitorDataError("group model allowlist is invalid")
+                raw_models = allowlist.get("models") or []
+                if not isinstance(raw_models, list):
+                    raise MonitorDataError("group model allowlist is invalid")
+                for model in raw_models:
+                    if isinstance(model, str) and model.strip():
+                        configured.add(model.strip())
+            pricing = item.get("model_pricing") or []
+            if not isinstance(pricing, list):
+                raise MonitorDataError("group model pricing is invalid")
+            for entry in pricing:
+                if not isinstance(entry, dict):
+                    raise MonitorDataError("group model pricing is invalid")
+                raw_models = entry.get("models") or []
+                if not isinstance(raw_models, list):
+                    raise MonitorDataError("group model pricing is invalid")
+                for model in raw_models:
+                    if isinstance(model, str) and model.strip():
+                        configured.add(model.strip())
             groups.append(
                 AdminGroupSummary(
                     group_id=_positive_id_text(item.get("id"), "group id"),
                     name=name.strip(),
                     platform=platform.strip(),
                     status=status.strip(),
+                    configured_models=tuple(sorted(configured)),
                 )
             )
         return groups

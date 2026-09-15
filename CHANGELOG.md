@@ -9,7 +9,9 @@
   Guardian probes the upstream model catalog of every usable account in
   each monitored group via `GET /admin/accounts/{id}/models` and rewrites
   the bound Sub2API channel's `model_mapping`, so the model plaza only
-  lists models that monitored groups can actually serve.  Refreshes are
+  lists models that are both configured on the group
+  (`model_allowlist`/`model_pricing`) and currently servable by a usable
+  account.  Refreshes are
   recorded as `MODEL_PLAZA_REFRESHED` events, only channels with a single
   model-mapping platform are rewritten, and a mapping is never emptied
   when every catalog fetch for a group failed.  Monitored groups that are
