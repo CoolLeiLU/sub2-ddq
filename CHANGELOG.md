@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Account recovery no longer treats Sub2API model-routing test errors
+  (`model_not_found` / "not supported by any configured account in this group")
+  as definitive account failures; they now report `test_incomplete` so accounts
+  are not disabled (or kept disabled) when the test model cannot be routed.
+
 ### Removed
 
 - Guardian no longer writes `priority`, `load_factor`, or `schedulable` account fields. The

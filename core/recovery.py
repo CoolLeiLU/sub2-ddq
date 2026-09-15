@@ -329,6 +329,19 @@ def parse_recovery_account_page(
     return candidates, pages
 
 
+def _routing_layer_test_error(error: Any) -> bool:
+    # Sub2API surfaces model-routing failures (the test model is not served by
+    # any account in the target group) as SSE error events.  They describe the
+    # group/model mapping, not the health of the account under test, so they
+    # must not count as a definitive account failure.
+    if not isinstance(error, str):
+        return False
+    return (
+        "model_not_found" in error
+        or "not supported by any configured account in this group" in error
+    )
+
+
 def account_test_result(body: bytes) -> bool | None:
     if not isinstance(body, bytes) or not body:
         raise MonitorDataError("invalid account test response")
@@ -363,6 +376,8 @@ def account_test_result(body: bytes) -> bool | None:
         if not isinstance(event, dict) or not isinstance(event.get("type"), str):
             raise MonitorDataError("invalid account test event")
         if event["type"] == "error":
+            if _routing_layer_test_error(event.get("error")):
+                return None
             return False
         if event["type"] == "test_complete":
             if not isinstance(event.get("success"), bool) or completed is not None:
