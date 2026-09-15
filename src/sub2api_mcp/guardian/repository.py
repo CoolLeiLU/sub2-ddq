@@ -759,10 +759,15 @@ class GuardianRepository:
     async def monitored_group_ids_for_snapshot(
         self,
         snapshot_id: str,
+        *,
+        excluded_channel_ids: frozenset[str] = frozenset(),
+        excluded_group_ids: frozenset[str] = frozenset(),
     ) -> frozenset[str] | None:
         return await asyncio.to_thread(
             self._monitored_group_ids_for_snapshot_sync,
             snapshot_id,
+            excluded_channel_ids=excluded_channel_ids,
+            excluded_group_ids=excluded_group_ids,
         )
 
     async def probe_templates_for_snapshot(
@@ -857,29 +862,45 @@ class GuardianRepository:
     def _monitored_group_ids_for_snapshot_sync(
         self,
         snapshot_id: str,
+        *,
+        excluded_channel_ids: frozenset[str] = frozenset(),
+        excluded_group_ids: frozenset[str] = frozenset(),
     ) -> frozenset[str] | None:
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT payload_json FROM guardian_input_snapshots WHERE snapshot_id = ?",
                 (_snapshot_id(snapshot_id),),
             ).fetchone()
+            excluded_monitor_rows = connection.execute(
+                "SELECT channel_id FROM guardian_channels "
+                "WHERE manual_control = 'EXCLUDED'"
+            ).fetchall()
         if row is None:
             return None
         try:
             snapshot = UpstreamProbeSnapshot.model_validate_json(row["payload_json"])
         except ValidationError:
             return None
-        # Channel entries only expose the group their usage-log binding
-        # resolved; groups served through a shared channel (vip variants) or
-        # carrying accounts without a bound channel still appear through
-        # account bindings.  Every group present in the snapshot is part of
-        # the scope Guardian observes and manages.
-        group_ids = {
-            entry.group_id for entry in snapshot.entries if entry.group_id is not None
-        }
+        # Only groups reachable through a monitored channel are in scope:
+        # excluded channels never seed their group, and account-bound groups
+        # join only when an account is shared with a monitored group.  Groups
+        # that lost their channel entirely (closed upstream) drop out so
+        # account recovery does not test or mutate accounts Guardian cannot
+        # actually route traffic to.
+        excluded_monitor_ids = {
+            str(excluded_row["channel_id"]) for excluded_row in excluded_monitor_rows
+        } | set(excluded_channel_ids)
+        entry_group_ids = {
+            entry.group_id
+            for entry in snapshot.entries
+            if entry.group_id is not None
+            and entry.monitor_id not in excluded_monitor_ids
+        } - set(excluded_group_ids)
+        group_ids = set(entry_group_ids)
         for account in snapshot.accounts:
-            group_ids.update(account.group_ids)
-        return frozenset(group_ids)
+            if entry_group_ids & set(account.group_ids):
+                group_ids.update(account.group_ids)
+        return frozenset(group_ids - set(excluded_group_ids))
 
     async def supersede_expired_input_snapshots(
         self,

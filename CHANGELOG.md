@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- The Guardian monitored scope is now closed under monitored channels: a group
+  enters scope through a monitored (non-excluded) channel entry or by sharing
+  an account with such a group. Accounts bound only to channels that were
+  closed or excluded upstream (e.g. a disabled image channel) are no longer
+  tested or mutated by account recovery.
 - Account recovery no longer treats Sub2API model-routing test errors
   (`model_not_found` / "not supported by any configured account in this group")
   as definitive account failures; they now report `test_incomplete` so accounts

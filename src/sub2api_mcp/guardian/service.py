@@ -415,15 +415,17 @@ class GuardianService:
                 "GUARDIAN_DISABLED",
                 "Guardian scheduling is disabled",
             )
+        scope = policy.scope
         monitored_group_ids = await self.repository.monitored_group_ids_for_snapshot(
-            snapshot_id
+            snapshot_id,
+            excluded_channel_ids=scope.excluded_channel_ids,
+            excluded_group_ids=scope.excluded_group_ids,
         )
         if monitored_group_ids is None:
             raise ServiceError(
                 "GUARDIAN_MONITORED_SCOPE_UNAVAILABLE",
                 "The monitored channel scope is unavailable for this account snapshot",
             )
-        scope = policy.scope
         if scope.managed_group_mode == "selected":
             monitored_group_ids = frozenset(scope.managed_group_ids)
         monitored_group_ids -= scope.excluded_group_ids
