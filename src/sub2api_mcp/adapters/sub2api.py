@@ -16,7 +16,7 @@ from maintenance import (
     MaintenancePolicy,
     MaintenanceServiceFactory,
 )
-from maintenance_gateway import AdminChannelSummary
+from maintenance_gateway import AdminChannelSummary, AdminGroupSummary
 from monitor import Sub2APIClient
 from notification_image import render_status_report_image
 from probe import ChannelProbe, GroupAccountCounts, ProbeSnapshot, format_status_report
@@ -514,6 +514,22 @@ class LegacySub2APIAdapter:
         model_mapping: dict[str, dict[str, str]],
     ) -> None:
         await self._client.update_channel_model_mapping(channel_id, model_mapping)
+
+    async def guardian_create_channel(
+        self,
+        *,
+        name: str,
+        group_ids: list[str],
+        model_mapping: dict[str, dict[str, str]],
+    ) -> str:
+        return await self._client.create_channel(
+            name=name,
+            group_ids=group_ids,
+            model_mapping=model_mapping,
+        )
+
+    async def guardian_list_groups(self) -> list[AdminGroupSummary]:
+        return await self._client.list_groups()
 
     @staticmethod
     def _build_guardian_snapshot(

@@ -12,7 +12,10 @@
   lists models that monitored groups can actually serve.  Refreshes are
   recorded as `MODEL_PLAZA_REFRESHED` events, only channels with a single
   model-mapping platform are rewritten, and a mapping is never emptied
-  when every catalog fetch for a group failed.
+  when every catalog fetch for a group failed.  Monitored groups that are
+  not bound to any channel get a new channel created for them (named
+  after the group, with the probed mapping) so they appear in the plaza;
+  inactive groups and empty probes are skipped.
 
 ### Removed
 

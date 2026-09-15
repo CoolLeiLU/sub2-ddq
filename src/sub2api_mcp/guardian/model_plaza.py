@@ -24,7 +24,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
-from maintenance_gateway import AdminChannelSummary
+from maintenance_gateway import AdminChannelSummary, AdminGroupSummary
 
 from .contracts import GuardianAccountObservation, GuardianAccountStatus
 from .repository import GuardianRepository
@@ -35,6 +35,8 @@ PLAZA_TIMEZONE = ZoneInfo("Asia/Shanghai")
 class ModelPlazaOperations(Protocol):
     async def guardian_list_channels(self) -> list[AdminChannelSummary]: ...
 
+    async def guardian_list_groups(self) -> list[AdminGroupSummary]: ...
+
     async def guardian_fetch_account_models(self, account_id: str) -> list[str]: ...
 
     async def guardian_update_channel_model_mapping(
@@ -42,6 +44,14 @@ class ModelPlazaOperations(Protocol):
         channel_id: str,
         model_mapping: dict[str, dict[str, str]],
     ) -> None: ...
+
+    async def guardian_create_channel(
+        self,
+        *,
+        name: str,
+        group_ids: list[str],
+        model_mapping: dict[str, dict[str, str]],
+    ) -> str: ...
 
 
 def latest_elapsed_slot(
@@ -214,6 +224,57 @@ class ModelPlazaRefresher:
                 models |= account_models.get(account_id, set())
             group_models[group_id] = models
         channels = await self._operations.guardian_list_channels()
+        bound_group_ids = {
+            group_id for channel in channels for group_id in channel.group_ids
+        }
+        unbound = sorted(
+            monitored_group_ids - bound_group_ids,
+            key=int,
+        )
+        created: list[dict[str, Any]] = []
+        if unbound:
+            groups = {
+                group.group_id: group
+                for group in await self._operations.guardian_list_groups()
+            }
+            for group_id in unbound:
+                entry: dict[str, Any] = {
+                    "group_id": group_id,
+                    "updated": False,
+                    "reason": "",
+                    "models": [],
+                }
+                meta = groups.get(group_id)
+                probed_models = sorted(group_models.get(group_id, set()))
+                if meta is None or meta.status != "active":
+                    entry["reason"] = "group_inactive"
+                elif not probed_models:
+                    entry["reason"] = "empty_probe"
+                else:
+                    desired = {model: model for model in probed_models}
+                    try:
+                        entry["channel_id"] = (
+                            await self._operations.guardian_create_channel(
+                                name=meta.name,
+                                group_ids=[group_id],
+                                model_mapping={meta.platform: desired},
+                            )
+                        )
+                    except Exception:
+                        entry["reason"] = "create_failed"
+                    else:
+                        entry.update(
+                            {
+                                "updated": True,
+                                "reason": "created",
+                                "name": meta.name,
+                                "platform": meta.platform,
+                                "models": probed_models,
+                                "added": probed_models,
+                                "removed": [],
+                            }
+                        )
+                created.append(entry)
         plan = channel_model_plan(channels, group_models, monitored_group_ids)
         for entry in plan:
             if not entry["updated"]:
@@ -226,7 +287,8 @@ class ModelPlazaRefresher:
             "channels": [
                 {key: value for key, value in entry.items() if key != "desired"}
                 for entry in plan
-            ],
+            ]
+            + created,
             "groups": {
                 group_id: sorted(models)
                 for group_id, models in sorted(

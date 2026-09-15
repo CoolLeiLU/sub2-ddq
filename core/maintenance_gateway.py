@@ -63,6 +63,7 @@ class MaintenanceApiAdapterConfig:
     usage_url: str
     request_logs_url: str
     channels_url: str = ""
+    groups_url: str = ""
     timezone_name: str = "Asia/Shanghai"
     account_snapshot_page_size: int = 100
     max_account_pages: int = 100
@@ -292,6 +293,14 @@ class AdminChannelSummary:
     status: str
     group_ids: tuple[str, ...]
     model_mapping: dict[str, dict[str, str]]
+
+
+@dataclass(frozen=True, slots=True)
+class AdminGroupSummary:
+    group_id: str
+    name: str
+    platform: str
+    status: str
 
 
 class MaintenanceApiAdapter:
@@ -618,6 +627,84 @@ class MaintenanceApiAdapter:
             channel_id,
             model_mapping,
         )
+
+    def create_channel_sync(
+        self,
+        *,
+        name: str,
+        group_ids: list[str],
+        model_mapping: dict[str, dict[str, str]],
+    ) -> str:
+        if not self._config.channels_url:
+            raise MonitorDataError("channels endpoint is not configured")
+        payload = self._request_port._request_json(
+            self._config.channels_url,
+            method="POST",
+            payload={
+                "name": name,
+                "group_ids": [int(group_id) for group_id in group_ids],
+                "model_mapping": model_mapping,
+            },
+        )
+        _require_success_envelope(payload)
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, dict):
+            raise MonitorDataError("channel create data is invalid")
+        return _positive_id_text(data.get("id"), "channel id")
+
+    async def create_channel(
+        self,
+        *,
+        name: str,
+        group_ids: list[str],
+        model_mapping: dict[str, dict[str, str]],
+    ) -> str:
+        return await asyncio.to_thread(
+            self.create_channel_sync,
+            name=name,
+            group_ids=group_ids,
+            model_mapping=model_mapping,
+        )
+
+    def list_groups_sync(self) -> list[AdminGroupSummary]:
+        if not self._config.groups_url:
+            raise MonitorDataError("groups endpoint is not configured")
+        payload = self._request_port._request_json(
+            f"{self._config.groups_url}?include_inactive=true"
+        )
+        if not isinstance(payload, dict) or payload.get("code") != 0:
+            raise MonitorDataError("group list request failed")
+        data = payload.get("data")
+        if not isinstance(data, list):
+            raise MonitorDataError("group list data is invalid")
+        groups: list[AdminGroupSummary] = []
+        for item in data:
+            if not isinstance(item, dict):
+                raise MonitorDataError("group list item is invalid")
+            name = item.get("name")
+            platform = item.get("platform")
+            status = item.get("status")
+            if (
+                not isinstance(name, str)
+                or not name.strip()
+                or not isinstance(platform, str)
+                or not platform.strip()
+                or not isinstance(status, str)
+                or not status.strip()
+            ):
+                raise MonitorDataError("group record is invalid")
+            groups.append(
+                AdminGroupSummary(
+                    group_id=_positive_id_text(item.get("id"), "group id"),
+                    name=name.strip(),
+                    platform=platform.strip(),
+                    status=status.strip(),
+                )
+            )
+        return groups
+
+    async def list_groups(self) -> list[AdminGroupSummary]:
+        return await asyncio.to_thread(self.list_groups_sync)
 
     def fetch_account_dispatch_state_sync(
         self,

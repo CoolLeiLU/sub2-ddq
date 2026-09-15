@@ -20,6 +20,7 @@ from client_errors import MonitorRequestError
 from maintenance import MaintenancePolicy
 from maintenance_gateway import (
     AdminChannelSummary,
+    AdminGroupSummary,
     MaintenanceApiAdapterConfig,
     MaintenanceApiAdapterFactory,
 )
@@ -380,6 +381,7 @@ class Sub2APIClient:
     # https://github.com/Wei-Shaw/sub2api/blob/2bc139ab527b4a687546d145dc7bb9063cf14510/backend/internal/handler/admin/account_handler.go#L1090-L1148
     ADMIN_ACCOUNTS_URL = "https://zhisuanapi.cn/api/v1/admin/accounts"
     ADMIN_CHANNELS_URL = "https://zhisuanapi.cn/api/v1/admin/channels"
+    ADMIN_GROUPS_URL = "https://zhisuanapi.cn/api/v1/admin/groups/all"
     ADMIN_USAGE_URL = "https://zhisuanapi.cn/api/v1/admin/usage"
     ADMIN_OPS_REQUESTS_URL = "https://zhisuanapi.cn/api/v1/admin/ops/requests"
     ADMIN_USERS_URL = "https://zhisuanapi.cn/api/v1/admin/users"
@@ -423,6 +425,7 @@ class Sub2APIClient:
             MaintenanceApiAdapterConfig(
                 accounts_url=self.ADMIN_ACCOUNTS_URL,
                 channels_url=self.ADMIN_CHANNELS_URL,
+                groups_url=self.ADMIN_GROUPS_URL,
                 usage_url=self.ADMIN_USAGE_URL,
                 request_logs_url=self.ADMIN_OPS_REQUESTS_URL,
                 timezone_name=self.USAGE_TIMEZONE,
@@ -738,6 +741,38 @@ class Sub2APIClient:
             channel_id,
             model_mapping,
         )
+
+    def create_channel_sync(
+        self,
+        *,
+        name: str,
+        group_ids: list[str],
+        model_mapping: dict[str, dict[str, str]],
+    ) -> str:
+        return self._maintenance_adapter.create_channel_sync(
+            name=name,
+            group_ids=group_ids,
+            model_mapping=model_mapping,
+        )
+
+    async def create_channel(
+        self,
+        *,
+        name: str,
+        group_ids: list[str],
+        model_mapping: dict[str, dict[str, str]],
+    ) -> str:
+        return await self._maintenance_adapter.create_channel(
+            name=name,
+            group_ids=group_ids,
+            model_mapping=model_mapping,
+        )
+
+    def list_groups_sync(self) -> list[AdminGroupSummary]:
+        return self._maintenance_adapter.list_groups_sync()
+
+    async def list_groups(self) -> list[AdminGroupSummary]:
+        return await self._maintenance_adapter.list_groups()
 
     def restore_account_sync(
         self,
