@@ -548,49 +548,6 @@ class Sub2APIMCPServer:
                 self._guardian().probe_budget,
             )
 
-        @mcp.tool(description="Advance one Guardian rollout stage with explicit confirmation.")
-        async def guardian_advance_rollout(
-            expected_revision: int,
-            confirm: bool = False,
-        ) -> str:
-            return await self._execute(
-                "guardian_advance_rollout",
-                "sub2api:admin",
-                lambda: self._guardian().advance_rollout(
-                    confirm=confirm,
-                    expected_revision=expected_revision,
-                ),
-                mutation=True,
-            )
-
-        @mcp.tool(description="Immediately stop Guardian writeback and return to observe mode.")
-        async def guardian_stop_writeback(expected_revision: int) -> str:
-            return await self._execute(
-                "guardian_stop_writeback",
-                "sub2api:admin",
-                lambda: self._guardian().stop_writeback(
-                    expected_revision=expected_revision
-                ),
-                mutation=True,
-            )
-
-        @mcp.tool(description="Preview original channel settings available for restoration.")
-        async def guardian_preview_restore() -> str:
-            return await self._execute(
-                "guardian_preview_restore",
-                "sub2api:admin",
-                self._guardian().restore_preview,
-            )
-
-        @mcp.tool(description="Restore original settings only with explicit confirmation.")
-        async def guardian_execute_restore(confirm: bool = False) -> str:
-            return await self._execute(
-                "guardian_execute_restore",
-                "sub2api:admin",
-                lambda: self._guardian().execute_restore(confirm=confirm),
-                mutation=True,
-            )
-
     async def _submit_video(
         self,
         prompt: str,

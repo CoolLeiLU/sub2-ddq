@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Removed
+
+- The 实时路由, 探测费用, and 调度说明 pages were removed: the routing
+  comparison only repeated channel-pool columns, and the spend/guard
+  guides added no controls.  Probe-spend and budget data remain available
+  through the MCP tools and `/probe-spend`/`/probe-budget` endpoints.
+- Retired writeback leftovers were deleted end to end: the
+  `/rollout/advance`, `/rollout/stop`, `/restores`, and `/live-routing`
+  endpoints, the `guardian_advance_rollout`, `guardian_stop_writeback`,
+  `guardian_preview_restore`, and `guardian_execute_restore` MCP tools,
+  and the unused `guardian_original_config` table.
+
 ### Fixed
 
 - Group-name matching for channel binding is now token-order insensitive so

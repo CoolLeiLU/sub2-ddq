@@ -1146,25 +1146,6 @@ class GuardianService:
         )
         return channel
 
-    async def live_routing(self) -> dict[str, Any]:
-        page = await self.repository.list_channels(limit=200)
-        items = cast(list[dict[str, Any]], page["items"])
-        return {
-            "items": [
-                {
-                    "channel_id": item["channel_id"],
-                    "name": item["name"],
-                    "group_id": item["group_id"],
-                    "health": item["health"],
-                    "score": item["score"],
-                    "upstream_schedulable": item["upstream_schedulable"],
-                    "desired_schedulable": item["desired_schedulable"],
-                    "expected_action": item["details"].get("expected_action"),
-                }
-                for item in items
-            ]
-        }
-
     async def list_events(
         self,
         *,
@@ -1222,33 +1203,3 @@ class GuardianService:
             "daily_token_limit": policy.recovery_budget.daily_tokens,
             "enabled": policy.recovery_budget.enabled,
         }
-
-    async def advance_rollout(
-        self,
-        *,
-        confirm: bool,
-        expected_revision: int,
-    ) -> dict[str, Any]:
-        del confirm, expected_revision
-        raise ServiceError(
-            "DEPRECATED_GUARDIAN_CONTROL",
-            "Rollout controls were removed; update policy.enabled instead",
-        )
-
-    async def stop_writeback(self, *, expected_revision: int) -> dict[str, Any]:
-        del expected_revision
-        raise ServiceError(
-            "DEPRECATED_GUARDIAN_CONTROL",
-            "Observe-mode stop was removed; update policy.enabled to false instead",
-        )
-
-    async def restore_preview(self) -> dict[str, Any]:
-        return await self.repository.restore_preview()
-
-    async def execute_restore(self, *, confirm: bool) -> dict[str, Any]:
-        if not confirm:
-            raise ServiceError("CONFIRMATION_REQUIRED", "Restore requires confirm=true")
-        raise ServiceError(
-            "WRITEBACK_NOT_APPROVED",
-            "Production writeback has not been explicitly approved",
-        )

@@ -40,7 +40,7 @@ from .contracts import (
     UpstreamProbeSnapshot,
 )
 
-GUARDIAN_SCHEMA_VERSION = 11
+GUARDIAN_SCHEMA_VERSION = 12
 
 GUARDIAN_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS guardian_metadata (
@@ -161,11 +161,6 @@ CREATE TABLE IF NOT EXISTS guardian_leases (
     lease_key TEXT PRIMARY KEY,
     owner TEXT NOT NULL,
     expires_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS guardian_original_config (
-    channel_id TEXT PRIMARY KEY,
-    config_json TEXT NOT NULL,
-    captured_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS guardian_idempotency (
     idempotency_key TEXT NOT NULL,
@@ -401,6 +396,8 @@ class GuardianRepository:
                 self._migrate_v9_to_v10_sync(connection)
             if current_version < 11:
                 self._migrate_v10_to_v11_sync(connection)
+            if current_version < 12:
+                self._migrate_v11_to_v12_sync(connection)
             connection.execute(
                 "INSERT INTO guardian_metadata(key, value) VALUES('schema_version', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -744,6 +741,12 @@ class GuardianRepository:
             "removed_at",
             "TEXT",
         )
+
+    @staticmethod
+    def _migrate_v11_to_v12_sync(connection: sqlite3.Connection) -> None:
+        """Drop the leftover channel-config restore table from retired writeback."""
+
+        connection.execute("DROP TABLE IF EXISTS guardian_original_config")
 
     @staticmethod
     def _ensure_column_sync(
@@ -3187,28 +3190,6 @@ class GuardianRepository:
         )
         counts["processed_total"] = batch_size - remaining
         return counts
-
-    async def restore_preview(self) -> dict[str, Any]:
-        return await asyncio.to_thread(self._restore_preview_sync)
-
-    def _restore_preview_sync(self) -> dict[str, Any]:
-        with self._connect() as connection:
-            rows = connection.execute(
-                "SELECT channel_id, config_json, captured_at FROM guardian_original_config "
-                "ORDER BY channel_id"
-            ).fetchall()
-        return {
-            "items": [
-                {
-                    "channel_id": row["channel_id"],
-                    "original_config": json.loads(row["config_json"]),
-                    "captured_at": row["captured_at"],
-                }
-                for row in rows
-            ],
-            "executable": False,
-            "reason": "writeback_adapter_not_enabled",
-        }
 
     async def get_idempotent_result(
         self, idempotency_key: str, action: str, subject: str | None

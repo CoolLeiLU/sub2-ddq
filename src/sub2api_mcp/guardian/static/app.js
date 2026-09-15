@@ -14,9 +14,6 @@ const pageMeta = {
   groups: ["分组调度", "分组健康、可用池与独立策略覆盖"],
   channels: ["渠道池", "渠道评分、状态和人工控制"],
   recovery: ["账号恢复", "异常账号、开放故障事件与恢复任务"],
-  routing: ["实时路由", "当前状态与期望调度状态对比"],
-  spend: ["探测费用", "主动探测 token 与成本估算"],
-  guide: ["调度说明", "评分、熔断、保底、降级和回池规则"],
   events: ["事件日志", "运行、状态迁移和人工操作审计"],
   policy: ["策略配置", "全局规则、系统参数与守护范围"],
   connection: ["连接设置", "上游、API 和存储状态"],
@@ -122,10 +119,6 @@ function statusBadge(value) {
         ? "success"
         : "neutral";
   return make("span", `badge ${className}`, labels[value] || value || "—");
-}
-
-function booleanBadge(value) {
-  return make("span", `badge ${value ? "success" : "neutral"}`, value ? "是" : "否");
 }
 
 function formatDate(value) {
@@ -251,8 +244,6 @@ async function refreshPage(page = currentPage) {
     groups: loadGroups,
     channels: loadChannels,
     recovery: loadRecovery,
-    routing: loadRouting,
-    spend: loadSpend,
     events: () => loadEvents(true),
     policy: loadPolicy,
     connection: loadConnection,
@@ -695,40 +686,6 @@ async function saveChannelSettings(event) {
   toast("渠道覆盖参数已保存");
   await showChannel(channelId);
   if (currentPage === "channels") await loadChannels();
-}
-
-async function loadRouting() {
-  const data = await api("/live-routing");
-  const items = data.items || [];
-  const body = $("#routing-table");
-  body.replaceChildren();
-  $("#routing-empty").hidden = items.length > 0;
-  for (const item of items) {
-    const row = make("tr");
-    cell(row, item.name);
-    cell(row, item.group_id || "未分组");
-    cell(row, make("span", "score-value", formatNumber(item.score)));
-    cell(row, booleanBadge(item.upstream_schedulable));
-    cell(row, booleanBadge(item.desired_schedulable));
-    cell(row, make("span", `badge ${item.expected_action === "NO_CHANGE" ? "success" : "warning"}`, item.expected_action || "—"));
-    body.append(row);
-  }
-}
-
-async function loadSpend() {
-  const [data, budget, policyData] = await Promise.all([
-    api("/probe-spend"),
-    api("/probe-budget"),
-    api("/policy"),
-  ]);
-  policyState = policyData.policy;
-  $("#spend-count").textContent = data.probe_count;
-  $("#spend-cost").textContent = `$${Number(data.estimated_cost || 0).toFixed(4)}`;
-  $("#spend-currency").textContent = data.currency;
-  $("#probe-budget-requests").textContent = `${budget.request_count || 0} / ${budget.daily_request_limit || 0}`;
-  $("#probe-budget-tokens").textContent = `${budget.total_tokens || 0} / ${budget.daily_token_limit || 0}`;
-  $("#probe-budget-blocked").textContent = budget.blocked_count || 0;
-  $("#probe-budget-state").textContent = budget.enabled ? "预算已启用" : "预算关闭";
 }
 
 async function loadEvents(reset = false) {

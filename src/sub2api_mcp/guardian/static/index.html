@@ -43,10 +43,7 @@
           <button class="nav-item" data-page="groups" type="button"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><circle cx="6" cy="7" r="2.5"/><circle cx="18" cy="7" r="2.5"/><circle cx="12" cy="17" r="2.5"/><path d="m8.2 8.2 2.4 6.2m5.2-6.2-2.4 6.2M8.5 7h7"/></svg>分组调度</button>
           <button class="nav-item" data-page="channels" type="button"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M5 5h14v4H5V5Zm0 10h14v4H5v-4Z"/><path d="M8 9v6m8-6v6"/></svg>渠道池</button>
           <button class="nav-item" data-page="recovery" type="button"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.3-5.7L4 8.6"/><path d="M4 4v4.6h4.6M12 8v4l2.8 1.8"/></svg>账号恢复</button>
-          <button class="nav-item" data-page="routing" type="button"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M4 7h13m0 0-3-3m3 3-3 3M20 17H7m0 0 3-3m-3 3 3 3"/></svg>实时路由</button>
-          <button class="nav-item" data-page="spend" type="button"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3 5 7v10l7 4 7-4V7l-7-4Z"/><path d="M9 10.5c0-1 1-1.8 3-1.8s3 .8 3 1.8-1 1.5-3 1.5-3 .6-3 1.7 1 1.8 3 1.8 3-.8 3-1.8M12 7v10"/></svg>探测费用</button>
           <p class="nav-label">管理</p>
-          <button class="nav-item" data-page="guide" type="button"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.8 9a2.4 2.4 0 1 1 3.6 2.1c-.9.5-1.4 1-1.4 2.1M12 17h.01"/></svg>调度说明</button>
           <button class="nav-item" data-page="events" type="button"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M8 6h12M8 12h12M8 18h12"/><circle cx="4" cy="6" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="18" r="1"/></svg>事件日志</button>
           <button class="nav-item" data-page="policy" type="button"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6 1.7 1.7 0 0 0 10 3v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"/></svg>策略配置</button>
           <button class="nav-item" data-page="connection" type="button"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M9 15 15 9M7.5 17.5l-1 1a3.5 3.5 0 0 1-5-5l4-4a3.5 3.5 0 0 1 5 0M16.5 6.5l1-1a3.5 3.5 0 0 1 5 5l-4 4a3.5 3.5 0 0 1-5 0"/></svg>连接设置</button>
@@ -121,27 +118,10 @@
             <article class="panel table-panel"><div class="table-scroll"><table><thead><tr><th>渠道</th><th>分组</th><th>健康分</th><th>置信度</th><th>证据新鲜度</th><th>延迟</th><th>Guardian</th><th>预期动作</th><th>人工控制</th><th>操作</th></tr></thead><tbody id="channels-table"></tbody></table></div><p class="empty" id="channels-empty">尚未同步渠道数据</p></article>
           </section>
 
-          <section class="page" id="page-routing">
-            <div class="section-intro"><div><h2>实时路由</h2><p>比较 Sub2API 当前状态与 Guardian 期望状态。</p></div><span class="mode-pill"><span class="status-dot amber"></span>候选结果</span></div>
-            <article class="panel table-panel"><div class="table-scroll"><table><thead><tr><th>渠道</th><th>分组</th><th>健康分</th><th>当前可调度</th><th>期望可调度</th><th>差异</th></tr></thead><tbody id="routing-table"></tbody></table></div><p class="empty" id="routing-empty">运行一次评估后显示路由候选</p></article>
-          </section>
-
-          <section class="page" id="page-spend">
-            <div class="section-intro"><div><h2>探测预算</h2><p>恢复探测受请求数和 token 双重硬预算限制。</p></div></div>
-            <div class="metric-grid five"><article class="metric"><span>历史探测次数</span><strong id="spend-count">0</strong><small>累计账本</small></article><article class="metric"><span>估算费用</span><strong id="spend-cost">$0.0000</strong><small id="spend-currency">USD</small></article><article class="metric"><span>今日恢复请求</span><strong id="probe-budget-requests">0 / 0</strong><small id="probe-budget-state">预算关闭</small></article><article class="metric"><span>今日恢复 Token</span><strong id="probe-budget-tokens">0 / 0</strong><small>达到上限立即停止</small></article><article class="metric"><span>被预算拦截</span><strong id="probe-budget-blocked">0</strong><small>不会绕过硬限制</small></article></div>
-            <div class="notice info"><span class="notice-icon"><svg class="inline-icon" aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 10v7M12 7h.01"/></svg></span><div><strong>费用数据如何产生</strong><p>仅当主动探测响应提供 token 用量且模型有单价时才累计估算费用；未知价格会单独标记，不会按 0 元掩盖。</p></div></div>
-          </section>
-
           <section class="page" id="page-recovery">
             <div class="section-intro"><div><h2>账号恢复</h2><p>仅处理最新快照中的异常账号；新渠道故障事件会扩展到唯一映射分组，人工暂停永不触碰。</p></div><button class="primary" id="recovery-run" type="button">处理待恢复账号</button></div>
             <div class="metric-grid four"><article class="metric"><span>恢复归属</span><strong id="recovery-owner">GUARDIAN</strong><small id="recovery-owner-note">重试冷却 900 秒</small></article><article class="metric"><span>异常快照</span><strong id="recovery-snapshot">无</strong><small>仅显示摘要</small></article><article class="metric"><span>开放事件</span><strong id="recovery-episodes">0</strong><small>连续错误事件</small></article><article class="metric"><span>最近任务</span><strong id="recovery-runs">0</strong><small>持久化运行记录</small></article></div>
             <div class="dashboard-grid recovery-grid"><article class="panel"><div class="panel-heading"><div><h2>开放故障事件</h2><p>同一连续错误事件只扩展探测一次。</p></div></div><div class="event-list" id="recovery-episode-list"><p class="empty">暂无开放事件</p></div></article><article class="panel"><div class="panel-heading"><div><h2>最近恢复任务</h2><p>展示触发类型与聚合结果，不回显账号身份。</p></div></div><div class="event-list" id="recovery-run-list"><p class="empty">暂无恢复任务</p></div></article></div>
-          </section>
-
-          <section class="page" id="page-guide">
-            <div class="section-intro"><div><h2>调度说明</h2><p>Guardian 每轮如何从样本得到健康状态与恢复动作。</p></div></div>
-            <ol class="flow-steps"><li><span>01</span><div><strong>共享同步</strong><p>复用既有渠道与账号清单，不增加正常账号探测。</p></div></li><li><span>02</span><div><strong>分类与评分</strong><p>区分成功、慢响应、网关、限额、探测失败和致命错误。</p></div></li><li><span>03</span><div><strong>状态决策</strong><p>依次应用人工控制、分组保底、熔断、降级和健康回池。</p></div></li><li><span>04</span><div><strong>账号恢复</strong><p>异常账号按冷却账本探测，人工暂停永不触碰。</p></div></li><li><span>05</span><div><strong>验证写入</strong><p>恢复限定单字段写、精确回读；失败立即停止剩余任务。</p></div></li></ol>
-            <div class="dashboard-grid"><article class="panel prose"><h2>精确评分</h2><code>final = short × 0.7 + longMean × 0.3</code><p>短期最新样本固定占 0.5，其余样本按 0.5 几何衰减归一化。默认短期窗口 10，长期窗口 60。</p></article><article class="panel prose"><h2>安全优先级</h2><code>排除 &gt; 暂停 &gt; 守护范围 &gt; 分组启用</code><p>人工暂停继续监控但永不自动恢复；致命错误也不能突破分组最低可用池。</p></article></div>
           </section>
 
           <section class="page" id="page-events">

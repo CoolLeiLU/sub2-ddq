@@ -88,7 +88,6 @@ class GuardianAPI:
                 self.channel_action,
                 methods=["POST"],
             ),
-            Route("/api/guardian/v1/live-routing", self.live_routing, methods=["GET"]),
             Route("/api/guardian/v1/probe-spend", self.probe_spend, methods=["GET"]),
             Route("/api/guardian/v1/probe-budget", self.probe_budget, methods=["GET"]),
             Route("/api/guardian/v1/sampling/status", self.sampling_status, methods=["GET"]),
@@ -97,15 +96,7 @@ class GuardianAPI:
                 self.channel_explanation,
                 methods=["GET"],
             ),
-            Route("/api/guardian/v1/rollout/advance", self.advance_rollout, methods=["POST"]),
-            Route("/api/guardian/v1/rollout/stop", self.stop_writeback, methods=["POST"]),
             Route("/api/guardian/v1/events", self.events, methods=["GET"]),
-            Route(
-                "/api/guardian/v1/restores/preview",
-                self.restore_preview,
-                methods=["POST"],
-            ),
-            Route("/api/guardian/v1/restores", self.restore, methods=["POST"]),
         ]
 
     async def redirect_ui(self, _: Request) -> Response:
@@ -334,9 +325,6 @@ class GuardianAPI:
             subject=channel_id,
         )
 
-    async def live_routing(self, request: Request) -> Response:
-        return await self._execute(request, "sub2api:read", self.service.live_routing)
-
     async def probe_spend(self, request: Request) -> Response:
         return await self._execute(request, "sub2api:read", self.service.probe_spend)
 
@@ -354,37 +342,6 @@ class GuardianAPI:
             lambda: self.service.channel_explanation(channel_id),
         )
 
-    async def advance_rollout(self, request: Request) -> Response:
-        async def advance() -> dict[str, Any]:
-            body = await self._body(request)
-            return await self.service.advance_rollout(
-                confirm=body.get("confirm") is True,
-                expected_revision=self._revision(request),
-            )
-
-        return await self._execute(
-            request,
-            "sub2api:admin",
-            advance,
-            mutation="guardian_advance_rollout",
-            require_idempotency=True,
-        )
-
-    async def stop_writeback(self, request: Request) -> Response:
-        async def stop() -> dict[str, Any]:
-            await self._body(request)
-            return await self.service.stop_writeback(
-                expected_revision=self._revision(request)
-            )
-
-        return await self._execute(
-            request,
-            "sub2api:admin",
-            stop,
-            mutation="guardian_stop_writeback",
-            require_idempotency=True,
-        )
-
     async def events(self, request: Request) -> Response:
         async def listing() -> dict[str, Any]:
             return await self.service.list_events(
@@ -395,33 +352,6 @@ class GuardianAPI:
             )
 
         return await self._execute(request, "sub2api:read", listing)
-
-    async def restore_preview(self, request: Request) -> Response:
-        async def preview() -> dict[str, Any]:
-            await self._body(request)
-            return await self.service.restore_preview()
-
-        return await self._execute(
-            request,
-            "sub2api:admin",
-            preview,
-            mutation="guardian_preview_restore",
-        )
-
-    async def restore(self, request: Request) -> Response:
-        async def execute() -> dict[str, Any]:
-            body = await self._body(request)
-            confirm = body.get("confirm")
-            if not isinstance(confirm, bool):
-                raise ServiceError("VALIDATION_ERROR", "confirm must be a boolean")
-            return await self.service.execute_restore(confirm=confirm)
-
-        return await self._execute(
-            request,
-            "sub2api:admin",
-            execute,
-            mutation="guardian_execute_restore",
-        )
 
     async def _execute(
         self,
@@ -512,7 +442,7 @@ class GuardianAPI:
 
     @staticmethod
     def _status_for(code: str) -> int:
-        if code in {"POLICY_REVISION_CONFLICT", "WRITEBACK_NOT_APPROVED"}:
+        if code in {"POLICY_REVISION_CONFLICT"}:
             return 409
         if code.endswith("_NOT_FOUND"):
             return 404

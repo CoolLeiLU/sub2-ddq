@@ -1111,44 +1111,6 @@ tbody tr:hover {
   flex: 1;
 }
 
-.flow-steps {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: var(--space-lg);
-  margin: 0 0 var(--space-xl);
-  padding: 0;
-  list-style: none;
-}
-
-.flow-steps li {
-  min-height: 9rem;
-  padding: var(--space-xl);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
-  background: var(--color-card);
-  box-shadow: var(--shadow-sm);
-}
-
-.flow-steps li > span {
-  display: block;
-  margin-bottom: var(--space-xl);
-  color: var(--color-primary);
-  font-family: "Fira Code", ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 0.75rem;
-  font-weight: 700;
-}
-
-.flow-steps strong {
-  color: var(--text-primary);
-  font-size: 0.875rem;
-}
-
-.flow-steps p {
-  margin: var(--space-md) 0 0;
-  color: var(--text-secondary);
-  font-size: 0.8125rem;
-}
-
 .prose code {
   display: block;
   margin: var(--space-xl) 0;
@@ -1531,10 +1493,6 @@ dialog::backdrop {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
-  .flow-steps {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
   .score-grid {
     grid-template-columns: repeat(4, minmax(4.5rem, 1fr));
   }
@@ -1647,20 +1605,6 @@ dialog::backdrop {
 
   .event-message {
     grid-column: 2 / -1;
-  }
-
-  .flow-steps {
-    grid-template-columns: 1fr;
-  }
-
-  .flow-steps li {
-    display: flex;
-    min-height: auto;
-    gap: var(--space-lg);
-  }
-
-  .flow-steps li > span {
-    margin: 0;
   }
 
   .form-grid,
