@@ -536,7 +536,9 @@ class MaintenanceCoordinator:
                 return MaintenanceReport(
                     notices=(MaintenanceNotice(code="AMBIGUOUS_GROUP_MAPPING"),)
                 )
-            monitored_group_ids = frozenset(
+            # Usage-log binding resolves only the base group a shared channel
+            # served; every known upstream group is managed scope here.
+            monitored_group_ids = known_group_ids | frozenset(
                 probe.accounts.group_id
                 for probe in probes
                 if probe.accounts is not None

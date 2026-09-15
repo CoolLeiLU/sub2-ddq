@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass
 from datetime import datetime, time as datetime_time, timedelta, timezone
@@ -225,8 +226,20 @@ class RecoveryOutcome:
 
 
 def _future_timestamp(value: Any, field: str, now: datetime) -> bool:
-    if value is None:
-        return False
+    timestamp = _timestamp_epoch(value, field)
+    return timestamp is not None and timestamp > now.timestamp()
+
+
+def _timestamp_epoch(value: Any, field: str) -> float | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        raise MonitorDataError(f"invalid {field}")
+    if isinstance(value, (int, float)):
+        timestamp = float(value)
+        if not math.isfinite(timestamp) or timestamp < 0:
+            raise MonitorDataError(f"invalid {field}")
+        return timestamp
     if not isinstance(value, str) or len(value) > 100:
         raise MonitorDataError(f"invalid {field}")
     try:
@@ -235,7 +248,10 @@ def _future_timestamp(value: Any, field: str, now: datetime) -> bool:
         raise MonitorDataError(f"invalid {field}") from exc
     if parsed.tzinfo is None:
         raise MonitorDataError(f"invalid {field}")
-    return parsed > now.astimezone(parsed.tzinfo)
+    timestamp = parsed.timestamp()
+    if not math.isfinite(timestamp) or timestamp < 0:
+        raise MonitorDataError(f"invalid {field}")
+    return timestamp
 
 
 def parse_recovery_account_page(
@@ -280,11 +296,7 @@ def parse_recovery_account_page(
         auto_pause = item.get("auto_pause_on_expired")
         if not isinstance(auto_pause, bool):
             raise MonitorDataError("invalid recovery account auto_pause_on_expired")
-        expires_at = item.get("expires_at")
-        if expires_at is not None and (
-            isinstance(expires_at, bool) or not isinstance(expires_at, (int, float))
-        ):
-            raise MonitorDataError("invalid recovery account expires_at")
+        expires_at = _timestamp_epoch(item.get("expires_at"), "recovery account expires_at")
         if auto_pause and expires_at is not None and expires_at <= now.timestamp():
             continue
         for field in (
@@ -311,7 +323,7 @@ def parse_recovery_account_page(
                 status=status,
                 schedulable=schedulable,
                 auto_pause_on_expired=auto_pause,
-                expires_at=float(expires_at) if expires_at is not None else None,
+                expires_at=expires_at,
             )
         )
     return candidates, pages
@@ -398,12 +410,9 @@ def recovered_account_is_normal(
     auto_pause = account.get("auto_pause_on_expired")
     if not isinstance(auto_pause, bool):
         raise MonitorDataError("invalid recovered account auto_pause_on_expired")
-    expires_at = account.get("expires_at")
-    if expires_at is not None:
-        if isinstance(expires_at, bool) or not isinstance(expires_at, (int, float)):
-            raise MonitorDataError("invalid recovered account expires_at")
-        if auto_pause and expires_at <= now.timestamp():
-            return False
+    expires_at = _timestamp_epoch(account.get("expires_at"), "recovered account expires_at")
+    if auto_pause and expires_at is not None and expires_at <= now.timestamp():
+        return False
     return True
 
 

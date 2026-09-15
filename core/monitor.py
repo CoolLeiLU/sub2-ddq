@@ -476,7 +476,12 @@ class Sub2APIClient:
             return body
         except MonitorRequestError:
             raise
-        except (urllib_error.HTTPError, urllib_error.URLError, TimeoutError, OSError) as exc:
+        except urllib_error.HTTPError as exc:
+            raise MonitorRequestError(
+                "Sub2API request failed",
+                status_code=exc.code,
+            ) from exc
+        except (urllib_error.URLError, TimeoutError, OSError) as exc:
             raise MonitorRequestError("Sub2API request failed") from exc
 
     def _request_json(
@@ -569,7 +574,12 @@ class Sub2APIClient:
             return b"".join(chunks), first_event_ms
         except MonitorRequestError:
             raise
-        except (urllib_error.HTTPError, urllib_error.URLError, TimeoutError, OSError) as exc:
+        except urllib_error.HTTPError as exc:
+            raise MonitorRequestError(
+                "Sub2API request failed",
+                status_code=exc.code,
+            ) from exc
+        except (urllib_error.URLError, TimeoutError, OSError) as exc:
             raise MonitorRequestError("Sub2API request failed") from exc
 
     def fetch_sync(self) -> list[ChannelHealth]:

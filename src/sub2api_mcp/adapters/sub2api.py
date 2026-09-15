@@ -156,11 +156,16 @@ class LegacySub2APIAdapter:
     async def _monitored_group_ids(self) -> frozenset[str]:
         probes = self._last_probes or await self._client.fetch_probe()
         self._last_probes = probes
-        return frozenset(
+        # Usage-log binding resolves only the base group a shared channel
+        # served; vip variants and groups without a bound channel stay
+        # unresolved.  The admin group list is the authoritative managed
+        # scope.
+        bound = frozenset(
             probe.accounts.group_id
             for probe in probes
             if probe.accounts is not None
         )
+        return bound | await self._client.fetch_known_group_ids()
 
     @staticmethod
     def _guardian_account_block_reason(state: AccountDispatchState) -> str | None:
@@ -168,7 +173,17 @@ class LegacySub2APIAdapter:
             return "account_state_unavailable"
         if state.expired:
             return "expired"
-        if state.temporary_unavailable:
+        # An automatic pause is exactly the state Guardian is allowed to
+        # probe.  The same account can still expose a future rate-limit or
+        # overload deadline; do not turn that server-owned protection into a
+        # permanent skip.  Non-active accounts with a stale deadline are also
+        # eligible for the recovery path because their status is already an
+        # explicit system-abnormal signal.
+        if (
+            state.temporary_unavailable
+            and state.status == "active"
+            and not state.automatic_pause
+        ):
             return "temporary_unavailable"
         if (
             state.status == "active"
@@ -246,15 +261,28 @@ class LegacySub2APIAdapter:
                 observed_schedulable=initial_account.schedulable,
                 observed_automatic_pause=initial_account.automatic_pause,
             )
-        if initial_account.expired or initial_account.temporary_unavailable:
+        if initial_account.expired:
             return GuardianAccountTestOutcome(
                 account_id=account_id,
                 result=AccountTestExecutionResult.SKIPPED,
-                reason=(
-                    "expired"
-                    if initial_account.expired
-                    else "temporary_unavailable"
-                ),
+                reason="expired",
+                observed_status=initial_account.status,
+                observed_schedulable=initial_account.schedulable,
+                observed_automatic_pause=initial_account.automatic_pause,
+            )
+        if initial_account.temporary_unavailable and not (
+            initial_account.automatic_pause
+            or initial_account.status
+            in {
+                GuardianAccountStatus.ERROR,
+                GuardianAccountStatus.DISABLED,
+                GuardianAccountStatus.INACTIVE,
+            }
+        ):
+            return GuardianAccountTestOutcome(
+                account_id=account_id,
+                result=AccountTestExecutionResult.SKIPPED,
+                reason="temporary_unavailable",
                 observed_status=initial_account.status,
                 observed_schedulable=initial_account.schedulable,
                 observed_automatic_pause=initial_account.automatic_pause,
@@ -375,6 +403,20 @@ class LegacySub2APIAdapter:
                 GuardianAccountStatus.INACTIVE,
             }
         ):
+            blocked = None
+        if blocked == "temporary_unavailable" and (
+            tested.observed_automatic_pause
+            or tested.observed_status
+            in {
+                GuardianAccountStatus.ERROR,
+                GuardianAccountStatus.DISABLED,
+                GuardianAccountStatus.INACTIVE,
+            }
+        ):
+            # A successful account test is the explicit proof that this
+            # previously automatic/system-protected account may be returned
+            # to the dispatch pool.  ``restore_account`` clears the upstream
+            # runtime protection before setting schedulable=true.
             blocked = None
         if blocked is not None:
             return GuardianAccountMutationOutcome(

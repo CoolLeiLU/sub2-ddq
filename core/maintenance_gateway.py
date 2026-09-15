@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -106,11 +107,8 @@ def _optional_non_negative_int(value: Any, field: str) -> int | None:
 
 
 def _future_epoch(value: Any, field: str, now: datetime) -> bool:
-    if value is None:
-        return False
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
-        raise MonitorDataError(f"invalid {field}")
-    return value > now.timestamp()
+    parsed = _external_epoch(value, field)
+    return parsed is not None and parsed > now.timestamp()
 
 
 def _non_negative_int(value: Any, field: str) -> int:
@@ -131,17 +129,38 @@ def _parse_external_datetime(value: Any, field: str) -> datetime:
     return parsed.astimezone(UTC)
 
 
+def _external_epoch(value: Any, field: str) -> float | None:
+    """Normalize Sub2API timestamps returned as Unix numbers or RFC3339 text.
+
+    Different Sub2API releases used both representations for nullable account
+    runtime fields.  Treating one representation as malformed makes the whole
+    account read fail closed, which in turn prevents Guardian from recovering
+    an otherwise healthy account.  Keep the normalization local and never
+    persist the upstream timestamp itself.
+    """
+
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        raise MonitorDataError(f"invalid {field}")
+    if isinstance(value, (int, float)):
+        parsed = float(value)
+        if not math.isfinite(parsed) or parsed < 0:
+            raise MonitorDataError(f"invalid {field}")
+        return parsed
+    if isinstance(value, str):
+        parsed_datetime = _parse_external_datetime(value, field)
+        parsed = parsed_datetime.timestamp()
+        if not math.isfinite(parsed) or parsed < 0:
+            raise MonitorDataError(f"invalid {field}")
+        return parsed
+    raise MonitorDataError(f"invalid {field}")
+
+
 def _has_external_datetime(value: Any, field: str) -> bool:
     """Validate a nullable Sub2API timestamp and report whether it exists."""
 
-    if value is None or value == "":
-        return False
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        if value < 0:
-            raise MonitorDataError(f"invalid {field}")
-        return True
-    _parse_external_datetime(value, field)
-    return True
+    return _external_epoch(value, field) is not None
 
 
 def _automatic_pause_from_account_data(
@@ -170,15 +189,16 @@ def _automatic_pause_from_account_data(
         )
     ):
         return True
-    for field in ("temp_unschedulable_reason", "error_message"):
-        value = data.get(field)
-        if value is None or value == "":
-            continue
-        if not isinstance(value, str) or len(value) > 200:
-            raise MonitorDataError(f"invalid {field}")
-        if value.strip():
-            return True
-    return False
+    # ``error_message`` is not a provenance field.  Sub2API can retain an old
+    # message after an administrator manually turns scheduling off, so using it
+    # here would incorrectly grant Guardian ownership of a human pause.
+    field = "temp_unschedulable_reason"
+    value = data.get(field)
+    if value is None or value == "":
+        return False
+    if not isinstance(value, str) or len(value) > 200:
+        raise MonitorDataError(f"invalid {field}")
+    return bool(value.strip())
 
 
 def _parse_admin_items_page(
@@ -506,13 +526,7 @@ class MaintenanceApiAdapter:
             auto_pause = data.get("auto_pause_on_expired", False)
             if not isinstance(auto_pause, bool):
                 raise MonitorDataError("account auto-pause state is invalid")
-            expires_at = data.get("expires_at")
-            if expires_at is not None and (
-                isinstance(expires_at, bool)
-                or not isinstance(expires_at, (int, float))
-                or expires_at < 0
-            ):
-                raise MonitorDataError("account expiry is invalid")
+            expires_at = _external_epoch(data.get("expires_at"), "account expiry")
             now = self._clock().astimezone(UTC)
             expired = bool(
                 auto_pause
@@ -607,15 +621,9 @@ class MaintenanceApiAdapter:
             ):
                 raise MonitorDataError("account concurrency is invalid")
             auto_pause = data.get("auto_pause_on_expired", False)
-            expires_at = data.get("expires_at")
+            expires_at = _external_epoch(data.get("expires_at"), "account expiry")
             if not isinstance(auto_pause, bool):
                 raise MonitorDataError("account auto-pause state is invalid")
-            if expires_at is not None and (
-                isinstance(expires_at, bool)
-                or not isinstance(expires_at, (int, float))
-                or expires_at < 0
-            ):
-                raise MonitorDataError("account expiry is invalid")
             now = self._clock().astimezone(UTC)
             expired = bool(
                 auto_pause
@@ -867,6 +875,35 @@ class MaintenanceApiAdapter:
                 )
             return classify_readback(payload)
 
+        def recover_upstream_state() -> None:
+            """Clear Sub2API's server-owned runtime protection before re-enabling.
+
+            ``recover-state`` clears error/rate-limit/overload/temp-unschedulable
+            fields, but (on affected Sub2API releases) deliberately does not
+            turn the dispatch switch back on.  The explicit schedulable write
+            below is therefore still required.  Older installations may not
+            expose this endpoint; a 404/405 is a safe compatibility fallback
+            because the final account readback remains authoritative.
+            """
+
+            try:
+                recovered = self._request_port._request_json(
+                    f"{account_url}/recover-state",
+                    method="POST",
+                )
+                _require_success_envelope(recovered)
+            except MonitorRequestError as exc:
+                if exc.status_code not in {404, 405}:
+                    # Continue with the explicit writes.  If the upstream
+                    # protection could not be cleared, exact readback below
+                    # will keep the result unsuccessful instead of claiming a
+                    # false recovery.
+                    return
+            except MonitorDataError:
+                # A non-success envelope is handled by the same authoritative
+                # readback rule; do not skip the status/schedulable writes.
+                return
+
         try:
             if not deadline_active():
                 return AccountRestoreResult(
@@ -874,6 +911,9 @@ class MaintenanceApiAdapter:
                     success=False,
                     reason="restore_deadline_expired",
                 )
+            recover_upstream_state()
+            if not deadline_active():
+                return readback_after_failure()
             # A failed credential-bearing write can still have reached the upstream.
             activated = self._request_port._request_json(
                 account_url,

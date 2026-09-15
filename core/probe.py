@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -383,8 +384,22 @@ def parse_channel_monitors(payload: Any) -> list[ChannelHealth]:
 
 
 def _future_timestamp(value: Any, field: str, now: datetime) -> bool:
-    if value is None:
-        return False
+    timestamp = _timestamp_epoch(value, field)
+    return timestamp is not None and timestamp > now.timestamp()
+
+
+def _timestamp_epoch(value: Any, field: str) -> float | None:
+    """Normalize a nullable timestamp from either supported API encoding."""
+
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        raise MonitorDataError(f"invalid {field}")
+    if isinstance(value, (int, float)):
+        timestamp = float(value)
+        if not math.isfinite(timestamp) or timestamp < 0:
+            raise MonitorDataError(f"invalid {field}")
+        return timestamp
     if not isinstance(value, str) or len(value) > 100:
         raise MonitorDataError(f"invalid {field}")
     try:
@@ -393,7 +408,10 @@ def _future_timestamp(value: Any, field: str, now: datetime) -> bool:
         raise MonitorDataError(f"invalid {field}") from exc
     if parsed.tzinfo is None:
         raise MonitorDataError(f"invalid {field}")
-    return parsed > now.astimezone(parsed.tzinfo)
+    timestamp = parsed.timestamp()
+    if not math.isfinite(timestamp) or timestamp < 0:
+        raise MonitorDataError(f"invalid {field}")
+    return timestamp
 
 
 def _present_timestamp(value: Any, field: str) -> bool:
@@ -404,21 +422,17 @@ def _present_timestamp(value: Any, field: str) -> bool:
     only the boolean result and never persist the upstream value itself.
     """
 
-    if value is None:
+    return _timestamp_epoch(value, field) is not None
+
+
+def _present_nonempty_text(value: Any, field: str) -> bool:
+    """Validate a nullable server-owned reason without treating arbitrary data as provenance."""
+
+    if value is None or value == "":
         return False
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        if value < 0:
-            raise MonitorDataError(f"invalid {field}")
-        return True
-    if not isinstance(value, str) or len(value) > 100:
+    if not isinstance(value, str) or len(value) > 200:
         raise MonitorDataError(f"invalid {field}")
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise MonitorDataError(f"invalid {field}") from exc
-    if parsed.tzinfo is None:
-        raise MonitorDataError(f"invalid {field}")
-    return True
+    return bool(value.strip())
 
 
 def parse_group_definitions(payload: Any) -> list[GroupDefinition]:
@@ -558,11 +572,7 @@ def parse_account_group_state_page(
         auto_pause = item.get("auto_pause_on_expired")
         if not isinstance(schedulable, bool) or not isinstance(auto_pause, bool):
             raise MonitorDataError("invalid account snapshot scheduling fields")
-        expires_at = item.get("expires_at")
-        if expires_at is not None and (
-            isinstance(expires_at, bool) or not isinstance(expires_at, (int, float))
-        ):
-            raise MonitorDataError("invalid account snapshot expires_at")
+        expires_at = _timestamp_epoch(item.get("expires_at"), "account snapshot expires_at")
         raw_group_ids = item.get("group_ids", [])
         if raw_group_ids is None:
             raw_group_ids = []
@@ -606,8 +616,10 @@ def parse_account_group_state_page(
                     item.get("temp_unschedulable_until"),
                     "temp_unschedulable_until",
                 )
-                or bool(str(item.get("temp_unschedulable_reason") or "").strip())
-                or bool(str(item.get("error_message") or "").strip())
+                or _present_nonempty_text(
+                    item.get("temp_unschedulable_reason"),
+                    "temp_unschedulable_reason",
+                )
             )
         if status == "error":
             bucket = "error"

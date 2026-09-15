@@ -61,8 +61,6 @@ def _classification(
 ) -> tuple[AccountRecoveryClassification, str]:
     if account.expired:
         return AccountRecoveryClassification.EXCLUDED, "expired"
-    if account.temporary_unavailable:
-        return AccountRecoveryClassification.EXCLUDED, "temporary_unavailable"
     if (
         account.status is GuardianAccountStatus.ACTIVE
         and not account.schedulable
@@ -72,13 +70,20 @@ def _classification(
         return AccountRecoveryClassification.MANUAL_PAUSE, "manual_pause"
     if account.account_id in quarantined_account_ids:
         return AccountRecoveryClassification.SYSTEM_QUARANTINE, "system_quarantine"
-    if account.status is GuardianAccountStatus.ERROR:
-        return AccountRecoveryClassification.UPSTREAM_ERROR, "upstream_error"
+    # A non-active status is itself a system-owned abnormal signal.  Do not
+    # let a stale/future runtime deadline hide it from the hourly recovery
+    # pass; the account test is deliberately cheap when the credential is not
+    # usable and a successful test must clear that protection.
     if account.status in {
+        GuardianAccountStatus.ERROR,
         GuardianAccountStatus.DISABLED,
         GuardianAccountStatus.INACTIVE,
     }:
+        if account.status is GuardianAccountStatus.ERROR:
+            return AccountRecoveryClassification.UPSTREAM_ERROR, "upstream_error"
         return AccountRecoveryClassification.DISABLED, "disabled"
+    if account.temporary_unavailable:
+        return AccountRecoveryClassification.EXCLUDED, "temporary_unavailable"
     return AccountRecoveryClassification.AVAILABLE, "normal_account"
 
 

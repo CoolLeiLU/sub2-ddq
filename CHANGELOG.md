@@ -111,6 +111,17 @@
   account is also shared with an unmonitored group; account-level enable/disable writes remain
   blocked and the recovery ledger records the test-only outcome.
 - Scoring cycles no longer fail when retention has redacted an old evidence `source_event_id`.
+- Guardian's managed group scope is now derived from every group present in the snapshot —
+  channel bindings plus account bindings — instead of only usage-log channel bindings.
+  Accounts shared with vip variant groups or groups without a bound channel are now tested
+  and restored instead of being skipped as shared with unmonitored scope. Explicit
+  `managed_group_ids`/`excluded_group_ids` policy scope is still honored.
+- Sub2API account runtime timestamps returned as RFC3339 text instead of Unix epoch numbers
+  no longer make the whole account state read fail closed; both encodings are normalized.
+- Account restore now clears Sub2API's server-owned runtime protection (`recover-state`)
+  before re-enabling, and a stale or future runtime deadline no longer hides a non-active
+  account status from the recovery pass. A leftover `error_message` no longer marks Guardian
+  ownership of a human pause; only `temp_unschedulable_reason` does.
 
 ## [0.1.0] - 2026-08-23
 

@@ -431,6 +431,10 @@ class GuardianService:
                 "GUARDIAN_MONITORED_SCOPE_UNAVAILABLE",
                 "The monitored channel scope is unavailable for this account snapshot",
             )
+        scope = policy.scope
+        if scope.managed_group_mode == "selected":
+            monitored_group_ids = frozenset(scope.managed_group_ids)
+        monitored_group_ids -= scope.excluded_group_ids
         run = await self._account_recovery.execute(
             snapshot_id=snapshot_id,
             trigger=trigger,

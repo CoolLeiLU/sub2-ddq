@@ -1019,11 +1019,17 @@ class GuardianRepository:
             snapshot = UpstreamProbeSnapshot.model_validate_json(row["payload_json"])
         except ValidationError:
             return None
-        return frozenset(
-            entry.group_id
-            for entry in snapshot.entries
-            if entry.group_id is not None
-        )
+        # Channel entries only expose the group their usage-log binding
+        # resolved; groups served through a shared channel (vip variants) or
+        # carrying accounts without a bound channel still appear through
+        # account bindings.  Every group present in the snapshot is part of
+        # the scope Guardian observes and manages.
+        group_ids = {
+            entry.group_id for entry in snapshot.entries if entry.group_id is not None
+        }
+        for account in snapshot.accounts:
+            group_ids.update(account.group_ids)
+        return frozenset(group_ids)
 
     async def supersede_expired_input_snapshots(
         self,
