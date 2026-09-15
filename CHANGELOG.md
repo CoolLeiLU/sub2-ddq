@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- Group-name matching for channel binding is now token-order insensitive so
+  monitors like "逆向 Claude" bind to groups like "Claude   逆向"; the groups
+  list no longer shows a synthetic "ungrouped" row.
 - The Guardian channel pool and group list now reconcile with the upstream
   admin list captured in each probe snapshot: channels that no longer exist
   upstream are flagged removed and hidden, reappearing channels are restored,

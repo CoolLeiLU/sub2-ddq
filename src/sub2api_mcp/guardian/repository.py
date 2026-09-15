@@ -2197,10 +2197,12 @@ class GuardianRepository:
                 "GROUP BY COALESCE(group_id, 'ungrouped') "
                 "ORDER BY group_id"
             ).fetchall()
-        channel_stats = {row["group_id"]: row for row in channel_rows}
+        channel_stats = {
+            row["group_id"]: row for row in channel_rows if row["group_id"] != "ungrouped"
+        }
         merged_ids = sorted(
             set(channel_stats) | {row["group_id"] for row in group_rows},
-            key=lambda value: (value != "ungrouped" and not value.isdigit(), value),
+            key=lambda value: (not value.isdigit(), value),
         )
         items: list[dict[str, Any]] = []
         for group_id in merged_ids:

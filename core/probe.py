@@ -27,7 +27,9 @@ _WHITESPACE_PATTERN = re.compile(r"\s+")
 def _semantic_group_key(value: str) -> str:
     text = _RATE_PREFIX_PATTERN.sub("", value)
     text = _GROUP_DECORATION_PATTERN.sub("", text)
-    text = _WHITESPACE_PATTERN.sub("", text).casefold()
+    # Token order is not meaningful in mixed CJK/ASCII names
+    # ("逆向 Claude" and "Claude 逆向" describe the same group).
+    text = "".join(sorted(_WHITESPACE_PATTERN.split(text.strip().casefold())))
     if text.endswith("渠道"):
         text = text[: -len("渠道")]
     if text.endswith("级"):
