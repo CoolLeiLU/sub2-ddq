@@ -18,7 +18,7 @@ from maintenance import (
 )
 from monitor import Sub2APIClient
 from notification_image import render_status_report_image
-from probe import ChannelProbe, ProbeSnapshot, format_status_report
+from probe import ChannelProbe, GroupAccountCounts, ProbeSnapshot, format_status_report
 from pydantic import TypeAdapter
 
 from ..actor_bridge import ActorAccount
@@ -111,7 +111,7 @@ class LegacySub2APIAdapter:
 
     async def probe(self) -> ProbeResult:
         triggered_at = datetime.now(UTC)
-        probes, accounts = await self._client.fetch_probe_with_accounts()
+        probes, accounts, groups = await self._client.fetch_probe_with_accounts()
         self._last_probes = probes
         snapshot = _SNAPSHOT_ADAPTER.validate_json(ProbeSnapshot.from_probes(probes).to_bytes())
         image_base64: str | None = None
@@ -129,7 +129,7 @@ class LegacySub2APIAdapter:
             snapshot=snapshot,
             report=format_status_report(probes, triggered_at=triggered_at),
             image_base64=image_base64,
-            guardian_snapshot=self._build_guardian_snapshot(probes),
+            guardian_snapshot=self._build_guardian_snapshot(probes, groups),
             account_observations=tuple(
                 AccountObservation(
                     account_id=account.account_id,
@@ -502,7 +502,10 @@ class LegacySub2APIAdapter:
         )
 
     @staticmethod
-    def _build_guardian_snapshot(probes: list[ChannelProbe]) -> dict[str, Any]:
+    def _build_guardian_snapshot(
+        probes: list[ChannelProbe],
+        groups: list[GroupAccountCounts] | None = None,
+    ) -> dict[str, Any]:
         entries: list[dict[str, Any]] = []
         for probe in probes:
             channel = probe.channel
@@ -533,7 +536,22 @@ class LegacySub2APIAdapter:
             entries.append(entry)
         entries.sort(key=lambda item: (str(item["monitor_id"]), str(item["name"])))
         snapshot = UpstreamProbeSnapshot.model_validate(
-            {"version": 1, "entries": entries}
+            {
+                "version": 1,
+                "entries": entries,
+                "groups": [
+                    {
+                        "group_id": group.group_id,
+                        "name": group.name,
+                        "total_count": group.total_count,
+                        "available_count": group.available_count,
+                        "error_count": group.error_count,
+                        "temporary_unavailable_count": group.temporary_unavailable_count,
+                        "closed_count": group.closed_count,
+                    }
+                    for group in (groups or [])
+                ],
+            }
         )
         return snapshot.model_dump(mode="json")
 

@@ -269,6 +269,21 @@ class GuardianEngine:
         now = self._clock()
         if now.tzinfo is None:
             raise ValueError("Guardian engine clock must be timezone-aware")
+        # Reconcile the tracked pool with the upstream truth captured in this
+        # snapshot: channels or groups that disappeared upstream are flagged
+        # removed (and restored if they reappear).  Empty collections are
+        # skipped because a missing field in older persisted snapshots is
+        # indistinguishable from an empty upstream response.
+        if snapshot.entries:
+            await self.repository.reconcile_channels(
+                {entry.monitor_id for entry in snapshot.entries},
+                removed_at=now,
+            )
+        if snapshot.groups:
+            await self.repository.upsert_groups(
+                list(snapshot.groups),
+                observed_at=captured_at or now,
+            )
         channels_evaluated = 0
         group_overrides = await self.repository.list_group_overrides()
         fuse_count = 0

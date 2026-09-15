@@ -36,10 +36,11 @@ from .contracts import (
     GuardianSample,
     GuardianSampleSource,
     ManualControl,
+    UpstreamGroupSummary,
     UpstreamProbeSnapshot,
 )
 
-GUARDIAN_SCHEMA_VERSION = 10
+GUARDIAN_SCHEMA_VERSION = 11
 
 GUARDIAN_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS guardian_metadata (
@@ -86,6 +87,18 @@ CREATE TABLE IF NOT EXISTS guardian_channels (
 );
 CREATE INDEX IF NOT EXISTS idx_guardian_channels_group
     ON guardian_channels(group_id, health, channel_id);
+CREATE TABLE IF NOT EXISTS guardian_groups (
+    group_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    total_count INTEGER NOT NULL DEFAULT 0,
+    available_count INTEGER NOT NULL DEFAULT 0,
+    error_count INTEGER NOT NULL DEFAULT 0,
+    temporary_unavailable_count INTEGER NOT NULL DEFAULT 0,
+    closed_count INTEGER NOT NULL DEFAULT 0,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    removed_at TEXT
+);
 CREATE TABLE IF NOT EXISTS guardian_samples (
     sample_id TEXT PRIMARY KEY,
     channel_id TEXT NOT NULL,
@@ -386,6 +399,8 @@ class GuardianRepository:
                 self._migrate_v8_to_v9_sync(connection)
             if current_version < 10:
                 self._migrate_v9_to_v10_sync(connection)
+            if current_version < 11:
+                self._migrate_v10_to_v11_sync(connection)
             connection.execute(
                 "INSERT INTO guardian_metadata(key, value) VALUES('schema_version', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -718,6 +733,17 @@ class GuardianRepository:
 
         connection.execute("DROP TABLE IF EXISTS guardian_field_ownership")
         connection.execute("DROP TABLE IF EXISTS guardian_write_audits")
+
+    @staticmethod
+    def _migrate_v10_to_v11_sync(connection: sqlite3.Connection) -> None:
+        """Track upstream removal on channels and persist the full group list."""
+
+        GuardianRepository._ensure_column_sync(
+            connection,
+            "guardian_channels",
+            "removed_at",
+            "TEXT",
+        )
 
     @staticmethod
     def _ensure_column_sync(
@@ -2022,7 +2048,7 @@ class GuardianRepository:
     ) -> dict[str, Any]:
         if not 1 <= limit <= 200:
             raise ServiceError("INVALID_PAGE_SIZE", "Page size must be between 1 and 200")
-        conditions: list[str] = []
+        conditions: list[str] = ["c.removed_at IS NULL"]
         params: list[object] = []
         if group_id:
             conditions.append("c.group_id = ?")
@@ -2059,35 +2085,166 @@ class GuardianRepository:
             "next_cursor": next_cursor,
         }
 
+    async def reconcile_channels(
+        self,
+        live_channel_ids: set[str] | frozenset[str],
+        *,
+        removed_at: datetime,
+    ) -> None:
+        """Flag channels that disappeared upstream and restore reappearing ones."""
+        await asyncio.to_thread(
+            self._reconcile_channels_sync, live_channel_ids, removed_at
+        )
+
+    def _reconcile_channels_sync(
+        self,
+        live_channel_ids: set[str] | frozenset[str],
+        removed_at: datetime,
+    ) -> None:
+        ids = {str(channel_id) for channel_id in live_channel_ids}
+        now = _iso(removed_at)
+        with self._connect() as connection:
+            if ids:
+                placeholders = ",".join("?" for _ in ids)
+                connection.execute(
+                    "UPDATE guardian_channels SET removed_at = NULL "
+                    f"WHERE removed_at IS NOT NULL AND channel_id IN ({placeholders})",
+                    tuple(sorted(ids)),
+                )
+                connection.execute(
+                    "UPDATE guardian_channels SET removed_at = ?, updated_at = ? "
+                    f"WHERE removed_at IS NULL AND channel_id NOT IN ({placeholders})",
+                    (now, now, *sorted(ids)),
+                )
+            else:
+                connection.execute(
+                    "UPDATE guardian_channels SET removed_at = ?, updated_at = ? "
+                    "WHERE removed_at IS NULL",
+                    (now, now),
+                )
+
+    async def upsert_groups(
+        self,
+        groups: list[UpstreamGroupSummary],
+        *,
+        observed_at: datetime,
+    ) -> None:
+        """Refresh the upstream group list; groups absent upstream are flagged removed."""
+        await asyncio.to_thread(self._upsert_groups_sync, groups, observed_at)
+
+    def _upsert_groups_sync(
+        self,
+        groups: list[UpstreamGroupSummary],
+        observed_at: datetime,
+    ) -> None:
+        seen = _iso(observed_at)
+        live_ids = [group.group_id for group in groups]
+        with self._connect() as connection:
+            for group in groups:
+                connection.execute(
+                    "INSERT INTO guardian_groups(group_id, name, total_count, "
+                    "available_count, error_count, temporary_unavailable_count, "
+                    "closed_count, first_seen_at, last_seen_at, removed_at) "
+                    "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, NULL) "
+                    "ON CONFLICT(group_id) DO UPDATE SET name = excluded.name, "
+                    "total_count = excluded.total_count, "
+                    "available_count = excluded.available_count, "
+                    "error_count = excluded.error_count, "
+                    "temporary_unavailable_count = excluded.temporary_unavailable_count, "
+                    "closed_count = excluded.closed_count, "
+                    "last_seen_at = excluded.last_seen_at, removed_at = NULL",
+                    (
+                        group.group_id,
+                        group.name,
+                        group.total_count,
+                        group.available_count,
+                        group.error_count,
+                        group.temporary_unavailable_count,
+                        group.closed_count,
+                        seen,
+                        seen,
+                    ),
+                )
+            if live_ids:
+                placeholders = ",".join("?" for _ in live_ids)
+                connection.execute(
+                    "UPDATE guardian_groups SET removed_at = ? "
+                    f"WHERE removed_at IS NULL AND group_id NOT IN ({placeholders})",
+                    (seen, *live_ids),
+                )
+            else:
+                connection.execute(
+                    "UPDATE guardian_groups SET removed_at = ? WHERE removed_at IS NULL",
+                    (seen,),
+                )
+
     async def list_groups(self) -> list[dict[str, Any]]:
         return await asyncio.to_thread(self._list_groups_sync)
 
     def _list_groups_sync(self) -> list[dict[str, Any]]:
         overrides = self._list_group_overrides_sync()
         with self._connect() as connection:
-            rows = connection.execute(
+            group_rows = connection.execute(
+                "SELECT * FROM guardian_groups WHERE removed_at IS NULL ORDER BY group_id"
+            ).fetchall()
+            channel_rows = connection.execute(
                 "SELECT COALESCE(group_id, 'ungrouped') AS group_id, "
                 "MAX(json_extract(details_json, '$.group_name')) AS group_name, "
                 "COUNT(*) AS channel_count, "
                 "SUM(CASE WHEN desired_schedulable = 1 THEN 1 ELSE 0 END) AS available_count, "
                 "AVG(score) AS score, AVG(latency_ms) AS latency_ms "
-                "FROM guardian_channels GROUP BY COALESCE(group_id, 'ungrouped') "
+                "FROM guardian_channels WHERE removed_at IS NULL "
+                "GROUP BY COALESCE(group_id, 'ungrouped') "
                 "ORDER BY group_id"
             ).fetchall()
-        return [
-            {
-                "group_id": row["group_id"],
-                "name": row["group_name"] or f"分组 {row['group_id']}",
-                "channel_count": int(row["channel_count"]),
-                "available_count": int(row["available_count"] or 0),
-                "score": round(float(row["score"] or 0), 6),
-                "latency_ms": (
-                    round(float(row["latency_ms"]), 3) if row["latency_ms"] is not None else None
-                ),
-                "override": overrides.get(row["group_id"]),
-            }
-            for row in rows
-        ]
+        channel_stats = {row["group_id"]: row for row in channel_rows}
+        merged_ids = sorted(
+            set(channel_stats) | {row["group_id"] for row in group_rows},
+            key=lambda value: (value != "ungrouped" and not value.isdigit(), value),
+        )
+        items: list[dict[str, Any]] = []
+        for group_id in merged_ids:
+            upstream = next(
+                (row for row in group_rows if row["group_id"] == group_id), None
+            )
+            stats = channel_stats.get(group_id)
+            items.append(
+                {
+                    "group_id": group_id,
+                    "name": (
+                        upstream["name"]
+                        if upstream is not None
+                        else stats["group_name"]
+                        if stats is not None and stats["group_name"]
+                        else f"分组 {group_id}"
+                    ),
+                    "channel_count": int(stats["channel_count"]) if stats else 0,
+                    "available_count": (
+                        int(stats["available_count"] or 0) if stats else 0
+                    ),
+                    "score": (
+                        round(float(stats["score"] or 0), 6) if stats else 0.0
+                    ),
+                    "latency_ms": (
+                        round(float(stats["latency_ms"]), 3)
+                        if stats is not None and stats["latency_ms"] is not None
+                        else None
+                    ),
+                    "upstream_total_count": (
+                        int(upstream["total_count"]) if upstream is not None else None
+                    ),
+                    "upstream_available_count": (
+                        int(upstream["available_count"])
+                        if upstream is not None
+                        else None
+                    ),
+                    "upstream_error_count": (
+                        int(upstream["error_count"]) if upstream is not None else None
+                    ),
+                    "override": overrides.get(group_id),
+                }
+            )
+        return items
 
     async def set_manual_control(
         self, channel_id: str, control: ManualControl | str
@@ -3241,6 +3398,7 @@ class GuardianRepository:
             "first_seen_at": row["first_seen_at"],
             "last_seen_at": row["last_seen_at"],
             "updated_at": row["updated_at"],
+            "removed_at": row["removed_at"],
         }
 
     @staticmethod

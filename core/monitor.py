@@ -756,7 +756,7 @@ class Sub2APIClient:
 
     def fetch_probe_with_accounts_sync(
         self,
-    ) -> tuple[list[ChannelProbe], list[AccountGroupState]]:
+    ) -> tuple[list[ChannelProbe], list[AccountGroupState], list[GroupAccountCounts]]:
         channels = self.fetch_sync()
         groups, accounts = self.fetch_group_account_snapshot_sync()
         try:
@@ -775,10 +775,11 @@ class Sub2APIClient:
                 group_ids_by_monitor=bindings,
             ),
             accounts,
+            groups,
         )
 
     def fetch_probe_sync(self) -> list[ChannelProbe]:
-        probes, _ = self.fetch_probe_with_accounts_sync()
+        probes, _, _ = self.fetch_probe_with_accounts_sync()
         return probes
 
     def fetch_probe_usage_records_sync(
@@ -870,7 +871,7 @@ class Sub2APIClient:
 
     async def fetch_probe_with_accounts(
         self,
-    ) -> tuple[list[ChannelProbe], list[AccountGroupState]]:
+    ) -> tuple[list[ChannelProbe], list[AccountGroupState], list[GroupAccountCounts]]:
         return await asyncio.to_thread(self.fetch_probe_with_accounts_sync)
 
     async def fetch_probe(self) -> list[ChannelProbe]:

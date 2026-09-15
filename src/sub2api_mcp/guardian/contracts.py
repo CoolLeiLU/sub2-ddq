@@ -718,10 +718,26 @@ class UpstreamProbeEntry(StrictModel):
         return self
 
 
+class UpstreamGroupSummary(StrictModel):
+    group_id: str = Field(min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=200)
+    total_count: int = Field(default=0, ge=0)
+    available_count: int = Field(default=0, ge=0)
+    error_count: int = Field(default=0, ge=0)
+    temporary_unavailable_count: int = Field(default=0, ge=0)
+    closed_count: int = Field(default=0, ge=0)
+
+
 class UpstreamProbeSnapshot(StrictModel):
     version: int = Field(default=1, ge=1, le=1)
     entries: tuple[UpstreamProbeEntry, ...] = Field(max_length=10_000)
     accounts: tuple[GuardianAccountObservation, ...] = Field(
+        default=(),
+        max_length=10_000,
+    )
+    # Optional for backward compatibility with snapshots persisted before
+    # upstream group summaries were captured.
+    groups: tuple[UpstreamGroupSummary, ...] = Field(
         default=(),
         max_length=10_000,
     )

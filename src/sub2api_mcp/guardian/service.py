@@ -1031,7 +1031,12 @@ class GuardianService:
         return await self.repository.cancel_run(run_id)
 
     async def list_groups(self) -> dict[str, Any]:
-        return {"items": await self.repository.list_groups()}
+        policy = await self.repository.get_policy()
+        excluded = policy.scope.excluded_group_ids
+        items = await self.repository.list_groups()
+        for item in items:
+            item["excluded"] = item["group_id"] in excluded
+        return {"items": items}
 
     async def update_group_policy(self, group_id: str, patch: dict[str, Any]) -> dict[str, Any]:
         validated = GroupPolicyOverride.model_validate(patch)

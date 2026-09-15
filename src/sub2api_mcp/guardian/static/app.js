@@ -495,7 +495,11 @@ async function loadGroups() {
     cell(row, group.available_count);
     cell(row, make("span", "score-value", formatNumber(group.score)));
     cell(row, group.latency_ms == null ? "—" : `${formatNumber(group.latency_ms, 0)} ms`);
-    cell(row, make("span", `badge ${group.override ? "neutral" : "success"}`, group.override ? "独立覆盖" : "继承全局"));
+    const source = make("div", "table-actions");
+    if (group.excluded) source.append(make("span", "badge danger", "已排除"));
+    else if (group.channel_count === 0) source.append(make("span", "badge neutral", "未接入渠道"));
+    source.append(make("span", `badge ${group.override ? "neutral" : "success"}`, group.override ? "独立覆盖" : "继承全局"));
+    cell(row, source);
     const actions = make("div", "table-actions");
     const settings = make("button", "table-action", "设置");
     settings.type = "button";

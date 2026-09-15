@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- The Guardian channel pool and group list now reconcile with the upstream
+  admin list captured in each probe snapshot: channels that no longer exist
+  upstream are flagged removed and hidden, reappearing channels are restored,
+  and groups without a bound channel (e.g. a closed image group) are listed
+  with their upstream account counts and exclusion state.
 - The Guardian monitored scope is now closed under monitored channels: a group
   enters scope through a monitored (non-excluded) channel entry or by sharing
   an account with such a group. Accounts bound only to channels that were
