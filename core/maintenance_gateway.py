@@ -628,6 +628,40 @@ class MaintenanceApiAdapter:
             model_mapping,
         )
 
+    def rebind_channel_sync(
+        self,
+        channel_id: str,
+        *,
+        group_ids: list[str],
+        model_mapping: dict[str, dict[str, str]],
+    ) -> None:
+        normalized_id = _positive_id_text(channel_id, "channel id")
+        if not self._config.channels_url:
+            raise MonitorDataError("channels endpoint is not configured")
+        payload = self._request_port._request_json(
+            f"{self._config.channels_url}/{normalized_id}",
+            method="PUT",
+            payload={
+                "group_ids": [int(group_id) for group_id in group_ids],
+                "model_mapping": model_mapping,
+            },
+        )
+        _require_success_envelope(payload)
+
+    async def rebind_channel(
+        self,
+        channel_id: str,
+        *,
+        group_ids: list[str],
+        model_mapping: dict[str, dict[str, str]],
+    ) -> None:
+        await asyncio.to_thread(
+            self.rebind_channel_sync,
+            channel_id,
+            group_ids=group_ids,
+            model_mapping=model_mapping,
+        )
+
     def create_channel_sync(
         self,
         *,

@@ -53,6 +53,14 @@ class ModelPlazaOperations(Protocol):
         model_mapping: dict[str, dict[str, str]],
     ) -> str: ...
 
+    async def guardian_rebind_channel(
+        self,
+        channel_id: str,
+        *,
+        group_ids: list[str],
+        model_mapping: dict[str, dict[str, str]],
+    ) -> None: ...
+
 
 def latest_elapsed_slot(
     now: datetime,
@@ -252,21 +260,42 @@ class ModelPlazaRefresher:
                     entry["reason"] = "empty_probe"
                 else:
                     desired = {model: model for model in probed_models}
+                    orphan = next(
+                        (
+                            channel
+                            for channel in channels
+                            if channel.name == meta.name
+                            and not any(
+                                bound in groups for bound in channel.group_ids
+                            )
+                        ),
+                        None,
+                    )
                     try:
-                        entry["channel_id"] = (
-                            await self._operations.guardian_create_channel(
-                                name=meta.name,
+                        if orphan is not None:
+                            await self._operations.guardian_rebind_channel(
+                                orphan.channel_id,
                                 group_ids=[group_id],
                                 model_mapping={meta.platform: desired},
                             )
-                        )
+                            entry["channel_id"] = orphan.channel_id
+                        else:
+                            entry["channel_id"] = (
+                                await self._operations.guardian_create_channel(
+                                    name=meta.name,
+                                    group_ids=[group_id],
+                                    model_mapping={meta.platform: desired},
+                                )
+                            )
                     except Exception:
                         entry["reason"] = "create_failed"
                     else:
                         entry.update(
                             {
                                 "updated": True,
-                                "reason": "created",
+                                "reason": (
+                                    "rebound" if orphan is not None else "created"
+                                ),
                                 "name": meta.name,
                                 "platform": meta.platform,
                                 "models": probed_models,

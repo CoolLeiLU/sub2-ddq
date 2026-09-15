@@ -528,6 +528,19 @@ class LegacySub2APIAdapter:
             model_mapping=model_mapping,
         )
 
+    async def guardian_rebind_channel(
+        self,
+        channel_id: str,
+        *,
+        group_ids: list[str],
+        model_mapping: dict[str, dict[str, str]],
+    ) -> None:
+        await self._client.rebind_channel(
+            channel_id,
+            group_ids=group_ids,
+            model_mapping=model_mapping,
+        )
+
     async def guardian_list_groups(self) -> list[AdminGroupSummary]:
         return await self._client.list_groups()
 

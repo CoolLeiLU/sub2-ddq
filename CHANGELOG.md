@@ -15,7 +15,10 @@
   when every catalog fetch for a group failed.  Monitored groups that are
   not bound to any channel get a new channel created for them (named
   after the group, with the probed mapping) so they appear in the plaza;
-  inactive groups and empty probes are skipped.
+  inactive groups and empty probes are skipped.  When the new group
+  shares its name with an orphaned channel whose bound groups all
+  disappeared upstream, that channel is rebound to the new group instead
+  of creating a duplicate.
 
 ### Removed
 

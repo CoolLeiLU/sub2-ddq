@@ -742,6 +742,32 @@ class Sub2APIClient:
             model_mapping,
         )
 
+    def rebind_channel_sync(
+        self,
+        channel_id: str,
+        *,
+        group_ids: list[str],
+        model_mapping: dict[str, dict[str, str]],
+    ) -> None:
+        return self._maintenance_adapter.rebind_channel_sync(
+            channel_id,
+            group_ids=group_ids,
+            model_mapping=model_mapping,
+        )
+
+    async def rebind_channel(
+        self,
+        channel_id: str,
+        *,
+        group_ids: list[str],
+        model_mapping: dict[str, dict[str, str]],
+    ) -> None:
+        return await self._maintenance_adapter.rebind_channel(
+            channel_id,
+            group_ids=group_ids,
+            model_mapping=model_mapping,
+        )
+
     def create_channel_sync(
         self,
         *,
