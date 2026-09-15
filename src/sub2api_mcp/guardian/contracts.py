@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from enum import StrEnum
 from typing import cast
@@ -431,6 +432,21 @@ class ScopePolicy(StrictModel):
     excluded_channel_ids: frozenset[str] = frozenset()
 
 
+class ModelPlazaPolicy(StrictModel):
+    enabled: bool = True
+    refresh_times: tuple[str, ...] = Field(
+        default=("00:00", "12:00"), min_length=1, max_length=8
+    )
+
+    @field_validator("refresh_times")
+    @classmethod
+    def validate_refresh_times(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for item in value:
+            if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", item):
+                raise ValueError("model plaza refresh times must be HH:MM")
+        return tuple(sorted(dict.fromkeys(value)))
+
+
 class GuardianPolicy(StrictModel):
     revision: int = Field(default=1, ge=1)
     enabled: bool = False
@@ -450,6 +466,7 @@ class GuardianPolicy(StrictModel):
         default_factory=AccountRecoveryPolicy
     )
     scope: ScopePolicy = Field(default_factory=ScopePolicy)
+    model_plaza: ModelPlazaPolicy = Field(default_factory=ModelPlazaPolicy)
 
     @model_validator(mode="before")
     @classmethod

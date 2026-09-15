@@ -32,6 +32,7 @@ from .contracts import (
     ManualControl,
 )
 from .engine import GuardianEngine
+from .model_plaza import ModelPlazaOperations, ModelPlazaRefresher
 from .repository import GuardianRepository
 
 _RETENTION_INTERVAL = timedelta(minutes=10)
@@ -109,6 +110,7 @@ class GuardianService:
         metrics: Metrics | None = None,
         notification_repository: SqliteRepository | None = None,
         account_operations: AccountRecoveryOperations | None = None,
+        plaza_operations: ModelPlazaOperations | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.repository = repository
@@ -122,6 +124,11 @@ class GuardianService:
         self._account_recovery = (
             AccountRecoveryExecutor(repository, account_operations, clock=self._clock)
             if account_operations is not None
+            else None
+        )
+        self._model_plaza = (
+            ModelPlazaRefresher(repository, plaza_operations, clock=self._clock)
+            if plaza_operations is not None
             else None
         )
         self._notified_account_recovery_run_ids: set[str] = set()
@@ -750,12 +757,42 @@ class GuardianService:
         try:
             await self._refresh_v2_metrics(run)
             await self._check_recovery_budget_alert()
+            await self._refresh_model_plaza_if_due(run)
             await self._run_retention_if_due(now=datetime.now(UTC))
         except Exception:
             self._logger.exception(
                 "guardian_post_run_operations_failed",
                 extra={"runId": run.get("run_id")},
             )
+
+    async def _refresh_model_plaza_if_due(self, run: dict[str, Any]) -> None:
+        if self._model_plaza is None or run.get("status") != "SUCCEEDED":
+            return
+        result = cast(dict[str, Any], run.get("result") or {})
+        if result.get("requested_dry_run"):
+            return
+        snapshot_id = result.get("snapshot_id")
+        if not isinstance(snapshot_id, str):
+            return
+        policy = await self.repository.get_policy()
+        if not policy.enabled or not policy.model_plaza.enabled:
+            return
+        scope = policy.scope
+        monitored_group_ids = await self.repository.monitored_group_ids_for_snapshot(
+            snapshot_id,
+            excluded_channel_ids=scope.excluded_channel_ids,
+            excluded_group_ids=scope.excluded_group_ids,
+        )
+        if monitored_group_ids is None:
+            return
+        if scope.managed_group_mode == "selected":
+            monitored_group_ids = frozenset(scope.managed_group_ids)
+        monitored_group_ids -= scope.excluded_group_ids
+        await self._model_plaza.refresh_if_due(
+            snapshot_id=snapshot_id,
+            monitored_group_ids=monitored_group_ids,
+            refresh_times=policy.model_plaza.refresh_times,
+        )
 
     async def _run_retention_if_due(self, *, now: datetime) -> None:
         if now.tzinfo is None:

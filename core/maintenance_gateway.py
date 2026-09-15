@@ -62,6 +62,7 @@ class MaintenanceApiAdapterConfig:
     accounts_url: str
     usage_url: str
     request_logs_url: str
+    channels_url: str = ""
     timezone_name: str = "Asia/Shanghai"
     account_snapshot_page_size: int = 100
     max_account_pages: int = 100
@@ -284,6 +285,15 @@ def _log_item_is_duplicate(
     return True
 
 
+@dataclass(frozen=True, slots=True)
+class AdminChannelSummary:
+    channel_id: str
+    name: str
+    status: str
+    group_ids: tuple[str, ...]
+    model_mapping: dict[str, dict[str, str]]
+
+
 class MaintenanceApiAdapter:
     """Adapts untrusted Sub2API maintenance responses to domain records."""
 
@@ -502,6 +512,112 @@ class MaintenanceApiAdapter:
 
     async def disable_account(self, account_id: str) -> AccountDisableResult:
         return await asyncio.to_thread(self.disable_account_sync, account_id)
+
+    def list_channels_sync(self) -> list[AdminChannelSummary]:
+        if not self._config.channels_url:
+            raise MonitorDataError("channels endpoint is not configured")
+        payload = self._request_port._request_json(
+            f"{self._config.channels_url}?page=1&page_size=100"
+        )
+        if not isinstance(payload, dict) or payload.get("code") != 0:
+            raise MonitorDataError("channel list request failed")
+        data = payload.get("data")
+        items = data.get("items") if isinstance(data, dict) else data
+        if not isinstance(items, list):
+            raise MonitorDataError("channel list data is invalid")
+        channels: list[AdminChannelSummary] = []
+        for item in items:
+            if not isinstance(item, dict):
+                raise MonitorDataError("channel list item is invalid")
+            channel_id = _positive_id_text(item.get("id"), "channel id")
+            name = item.get("name")
+            status = item.get("status")
+            if not isinstance(name, str) or not name.strip():
+                raise MonitorDataError("channel name is invalid")
+            if not isinstance(status, str) or not status.strip():
+                raise MonitorDataError("channel status is invalid")
+            raw_group_ids = item.get("group_ids") or []
+            if not isinstance(raw_group_ids, list):
+                raise MonitorDataError("channel group ids are invalid")
+            group_ids = tuple(
+                _positive_id_text(group_id, "channel group id")
+                for group_id in raw_group_ids
+            )
+            raw_mapping = item.get("model_mapping") or {}
+            if not isinstance(raw_mapping, dict):
+                raise MonitorDataError("channel model mapping is invalid")
+            model_mapping: dict[str, dict[str, str]] = {}
+            for platform, mapping in raw_mapping.items():
+                if not isinstance(platform, str) or not isinstance(mapping, dict):
+                    raise MonitorDataError("channel model mapping is invalid")
+                model_mapping[platform] = {
+                    str(source): str(target)
+                    for source, target in mapping.items()
+                }
+            channels.append(
+                AdminChannelSummary(
+                    channel_id=channel_id,
+                    name=name.strip(),
+                    status=status.strip(),
+                    group_ids=group_ids,
+                    model_mapping=model_mapping,
+                )
+            )
+        return channels
+
+    async def list_channels(self) -> list[AdminChannelSummary]:
+        return await asyncio.to_thread(self.list_channels_sync)
+
+    def fetch_account_models_sync(self, account_id: str) -> list[str]:
+        normalized_id = _positive_id_text(account_id, "account id")
+        payload = self._request_port._request_json(
+            f"{self._config.accounts_url}/{normalized_id}/models"
+        )
+        if not isinstance(payload, dict) or payload.get("code") != 0:
+            raise MonitorDataError("account models request failed")
+        data = payload.get("data")
+        if not isinstance(data, list):
+            raise MonitorDataError("account models data is invalid")
+        models: set[str] = set()
+        for item in data:
+            if isinstance(item, str):
+                model_id = item.strip()
+            elif isinstance(item, dict):
+                model_id = str(item.get("id") or "").strip()
+            else:
+                raise MonitorDataError("account model entry is invalid")
+            if model_id:
+                models.add(model_id)
+        return sorted(models)
+
+    async def fetch_account_models(self, account_id: str) -> list[str]:
+        return await asyncio.to_thread(self.fetch_account_models_sync, account_id)
+
+    def update_channel_model_mapping_sync(
+        self,
+        channel_id: str,
+        model_mapping: dict[str, dict[str, str]],
+    ) -> None:
+        normalized_id = _positive_id_text(channel_id, "channel id")
+        if not self._config.channels_url:
+            raise MonitorDataError("channels endpoint is not configured")
+        payload = self._request_port._request_json(
+            f"{self._config.channels_url}/{normalized_id}",
+            method="PUT",
+            payload={"model_mapping": model_mapping},
+        )
+        _require_success_envelope(payload)
+
+    async def update_channel_model_mapping(
+        self,
+        channel_id: str,
+        model_mapping: dict[str, dict[str, str]],
+    ) -> None:
+        await asyncio.to_thread(
+            self.update_channel_model_mapping_sync,
+            channel_id,
+            model_mapping,
+        )
 
     def fetch_account_dispatch_state_sync(
         self,

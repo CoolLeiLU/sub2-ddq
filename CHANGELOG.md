@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- Scheduled model-plaza refresh: twice daily at the configured
+  `model_plaza.refresh_times` (default 00:00 and 12:00 Asia/Shanghai)
+  Guardian probes the upstream model catalog of every usable account in
+  each monitored group via `GET /admin/accounts/{id}/models` and rewrites
+  the bound Sub2API channel's `model_mapping`, so the model plaza only
+  lists models that monitored groups can actually serve.  Refreshes are
+  recorded as `MODEL_PLAZA_REFRESHED` events, only channels with a single
+  model-mapping platform are rewritten, and a mapping is never emptied
+  when every catalog fetch for a group failed.
+
 ### Removed
 
 - The 实时路由, 探测费用, and 调度说明 pages were removed: the routing

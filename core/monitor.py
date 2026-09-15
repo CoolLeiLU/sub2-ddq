@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 from client_errors import MonitorRequestError
 from maintenance import MaintenancePolicy
 from maintenance_gateway import (
+    AdminChannelSummary,
     MaintenanceApiAdapterConfig,
     MaintenanceApiAdapterFactory,
 )
@@ -378,6 +379,7 @@ class Sub2APIClient:
     # Account tests stream SSE; successful tests are followed by runtime recovery:
     # https://github.com/Wei-Shaw/sub2api/blob/2bc139ab527b4a687546d145dc7bb9063cf14510/backend/internal/handler/admin/account_handler.go#L1090-L1148
     ADMIN_ACCOUNTS_URL = "https://zhisuanapi.cn/api/v1/admin/accounts"
+    ADMIN_CHANNELS_URL = "https://zhisuanapi.cn/api/v1/admin/channels"
     ADMIN_USAGE_URL = "https://zhisuanapi.cn/api/v1/admin/usage"
     ADMIN_OPS_REQUESTS_URL = "https://zhisuanapi.cn/api/v1/admin/ops/requests"
     ADMIN_USERS_URL = "https://zhisuanapi.cn/api/v1/admin/users"
@@ -420,6 +422,7 @@ class Sub2APIClient:
             self,
             MaintenanceApiAdapterConfig(
                 accounts_url=self.ADMIN_ACCOUNTS_URL,
+                channels_url=self.ADMIN_CHANNELS_URL,
                 usage_url=self.ADMIN_USAGE_URL,
                 request_logs_url=self.ADMIN_OPS_REQUESTS_URL,
                 timezone_name=self.USAGE_TIMEZONE,
@@ -703,6 +706,38 @@ class Sub2APIClient:
 
     async def fetch_account_dispatch_state(self, account_id: str):
         return await self._maintenance_adapter.fetch_account_dispatch_state(account_id)
+
+    def list_channels_sync(self) -> list[AdminChannelSummary]:
+        return self._maintenance_adapter.list_channels_sync()
+
+    async def list_channels(self) -> list[AdminChannelSummary]:
+        return await self._maintenance_adapter.list_channels()
+
+    def fetch_account_models_sync(self, account_id: str) -> list[str]:
+        return self._maintenance_adapter.fetch_account_models_sync(account_id)
+
+    async def fetch_account_models(self, account_id: str) -> list[str]:
+        return await self._maintenance_adapter.fetch_account_models(account_id)
+
+    def update_channel_model_mapping_sync(
+        self,
+        channel_id: str,
+        model_mapping: dict[str, dict[str, str]],
+    ) -> None:
+        return self._maintenance_adapter.update_channel_model_mapping_sync(
+            channel_id,
+            model_mapping,
+        )
+
+    async def update_channel_model_mapping(
+        self,
+        channel_id: str,
+        model_mapping: dict[str, dict[str, str]],
+    ) -> None:
+        return await self._maintenance_adapter.update_channel_model_mapping(
+            channel_id,
+            model_mapping,
+        )
 
     def restore_account_sync(
         self,

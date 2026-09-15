@@ -35,6 +35,7 @@ from .errors import ServiceError
 from .guardian.account_recovery import AccountRecoveryOperations
 from .guardian.api import GuardianAPI
 from .guardian.engine import GuardianEngine
+from .guardian.model_plaza import ModelPlazaOperations
 from .guardian.repository import GuardianRepository
 from .guardian.service import GuardianService
 from .jobs import JobManager, VideoJobService
@@ -152,6 +153,7 @@ def build_runtime(
         metrics,
         repository,
         account_operations=cast(AccountRecoveryOperations, operations),
+        plaza_operations=cast(ModelPlazaOperations, operations),
     )
     service = Sub2APIService(
         repository=repository,

@@ -986,6 +986,29 @@ class GuardianRepository:
             ).fetchone()
         return bool(row is not None and row["value"] == "true")
 
+    async def model_plaza_last_refresh(self) -> datetime | None:
+        return await asyncio.to_thread(self._model_plaza_last_refresh_sync)
+
+    def _model_plaza_last_refresh_sync(self) -> datetime | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT value FROM guardian_metadata WHERE key = 'model_plaza_last_refresh'"
+            ).fetchone()
+        if row is None:
+            return None
+        parsed = datetime.fromisoformat(row["value"])
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+    async def mark_model_plaza_refreshed(self, refreshed_at: datetime) -> None:
+        await asyncio.to_thread(self._mark_model_plaza_refreshed_sync, refreshed_at)
+
+    def _mark_model_plaza_refreshed_sync(self, refreshed_at: datetime) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO guardian_metadata(key, value) VALUES(?, ?)",
+                ("model_plaza_last_refresh", _iso(refreshed_at)),
+            )
+
     async def claim_input_snapshot(
         self,
         owner: str,
