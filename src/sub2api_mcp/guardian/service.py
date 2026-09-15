@@ -28,11 +28,7 @@ from .contracts import (
     GroupPolicyOverride,
     GuardianAccountRecoveryRecord,
     GuardianAccountRecoveryRun,
-    GuardianFieldName,
-    GuardianFieldOwner,
-    GuardianFieldOwnership,
     GuardianPolicy,
-    GuardianWriteOutcome,
     ManualControl,
 )
 from .engine import GuardianEngine
@@ -211,11 +207,9 @@ class GuardianService:
         runs = await self.repository.list_runs(limit=1)
         return {
             "enabled": policy.enabled,
-            "scheduling_mode": policy.scheduling_mode.value,
             "background_task_running": self._task is not None and not self._task.done(),
             "scan_interval_seconds": policy.scan_interval_seconds,
             "last_run": runs[0] if runs else None,
-            "writeback_adapter": "verified_account_fields",
         }
 
     async def set_scheduling_enabled(
@@ -252,7 +246,6 @@ class GuardianService:
         )
         result = {
             "enabled": policy.enabled,
-            "scheduling_mode": policy.scheduling_mode.value,
             "policy_revision": policy.revision,
         }
         await self.repository.add_event(
@@ -276,7 +269,6 @@ class GuardianService:
             [
                 f"状态：{'启用' if enabled else '停止'}",
                 f"策略版本：{policy.revision}",
-                "写入模式：逐账号单字段写入并精确回读",
                 "原因：管理员显式确认",
             ],
             coalesce_key="guardian:scheduling",
@@ -835,39 +827,6 @@ class GuardianService:
             self._metrics.guardian_shared_snapshots.labels(status="consumed").inc()
         elif result.get("no_new_evidence") and not replayed:
             self._metrics.guardian_shared_snapshots.labels(status="empty").inc()
-        reason = str(result.get("writeback_blocked_reason") or "")
-        if reason and not replayed:
-            self._metrics.guardian_write_frozen.labels(reason=reason).inc()
-        raw_field_outcomes = result.get("writeback_field_outcomes")
-        field_outcomes = (
-            cast(dict[str, object], raw_field_outcomes)
-            if isinstance(raw_field_outcomes, dict)
-            else {}
-        )
-        for field_name in GuardianFieldName:
-            raw_outcomes = field_outcomes.get(field_name.value)
-            outcomes = (
-                cast(dict[str, object], raw_outcomes)
-                if isinstance(raw_outcomes, dict)
-                else {}
-            )
-            for outcome in (
-                GuardianWriteOutcome.APPLIED,
-                GuardianWriteOutcome.BLOCKED,
-                GuardianWriteOutcome.FAILED,
-                GuardianWriteOutcome.NO_CHANGE,
-            ):
-                count = outcomes.get(outcome.value)
-                if (
-                    not replayed
-                    and isinstance(count, int)
-                    and not isinstance(count, bool)
-                    and count > 0
-                ):
-                    self._metrics.guardian_scheduling_writes.labels(
-                        field=field_name.value,
-                        outcome=outcome.value,
-                    ).inc(count)
         duplicates = int(result.get("duplicate_observations") or 0)
         if duplicates and not replayed:
             self._metrics.guardian_duplicate_observations.labels(
@@ -1002,8 +961,7 @@ class GuardianService:
                         f"置信度：{float(item.get('confidence', 0)) * 100:.0f}%",
                         f"   证据来源：{source_text}｜证据年龄：{age} 秒",
                         f"   目标动作：{item.get('action', 'NO_CHANGE')}｜"
-                        f"实际写回：{'是' if item.get('writes_applied') else '否'}",
-                        f"   探测：{item.get('event_type', '—')}｜"
+                        f"探测：{item.get('event_type', '—')}｜"
                         f"原因：{item.get('reason', '—')}",
                     ]
                 )
@@ -1018,7 +976,6 @@ class GuardianService:
                         f"评估渠道：{result.get('channels_evaluated', 0)}",
                         f"状态变化：{result.get('state_transitions', 0)}",
                         f"预期差异：{result.get('expected_changes', 0)}",
-                        f"实际写入：{result.get('writes_applied', 0)}",
                         *detail_lines,
                     ]
                 )
@@ -1154,7 +1111,6 @@ class GuardianService:
         action: str,
         *,
         idempotency_key: str | None = None,
-        minutes: int | None = None,
     ) -> dict[str, Any]:
         normalized = action.strip().casefold()
         controls = {
@@ -1170,38 +1126,6 @@ class GuardianService:
                 dry_run=True,
                 idempotency_key=idempotency_key or f"probe:{channel_id}",
             )
-        if normalized in {"boost", "unboost"}:
-            channel = await self.repository.get_channel(channel_id)
-            if channel is None:
-                raise ServiceError("CHANNEL_NOT_FOUND", "The Guardian channel does not exist")
-            current = await self.repository.get_channel_override(channel_id)
-            current = current or ChannelPolicyOverride()
-            if normalized == "boost":
-                duration = minutes if minutes is not None else 30
-                if not 1 <= duration <= 10_080:
-                    raise ServiceError(
-                        "VALIDATION_ERROR", "Boost duration must be 1 to 10080 minutes"
-                    )
-                updated = current.model_copy(
-                    update={
-                        "boost_until": datetime.now(UTC) + timedelta(minutes=duration),
-                        "boost_load_delta": 1000,
-                    }
-                )
-            else:
-                updated = current.model_copy(update={"boost_until": None, "boost_load_delta": None})
-            await self.repository.upsert_channel_override(channel_id, updated)
-            await self.repository.add_event(
-                event_type=f"CHANNEL_{normalized.upper()}",
-                severity="INFO",
-                channel_id=channel_id,
-                group_id=cast(str | None, channel["group_id"]),
-                message=f"Temporary channel boost action: {normalized}",
-                details={"minutes": minutes if normalized == "boost" else None},
-            )
-            saved = await self.repository.get_channel(channel_id)
-            assert saved is not None
-            return saved
         if normalized not in controls:
             raise ServiceError("INVALID_CHANNEL_ACTION", "The channel action is invalid")
         channel = await self.repository.set_manual_control(channel_id, controls[normalized])
@@ -1229,7 +1153,6 @@ class GuardianService:
                     "upstream_schedulable": item["upstream_schedulable"],
                     "desired_schedulable": item["desired_schedulable"],
                     "expected_action": item["details"].get("expected_action"),
-                    "candidate_weight": item["details"].get("candidate_weight"),
                 }
                 for item in items
             ]
@@ -1279,104 +1202,8 @@ class GuardianService:
             "evidence_sources": channel["details"].get("evidence_sources", []),
             "short_score": channel["details"].get("short_score"),
             "long_score": channel["details"].get("long_score"),
-            "desired_priority": channel["details"].get("desired_priority"),
-            "desired_load_factor": channel["details"].get("desired_load_factor"),
             "expected_action": channel["details"].get("expected_action"),
         }
-
-    async def write_ownership(self) -> dict[str, Any]:
-        return {"items": await self.repository.list_field_ownership()}
-
-    async def set_field_ownership(
-        self,
-        *,
-        channel_id: str,
-        field_name: str,
-        owner: str,
-        expected_revision: int,
-    ) -> dict[str, Any]:
-        policy = await self.repository.get_policy()
-        if policy.revision != expected_revision:
-            raise ServiceError(
-                "POLICY_REVISION_CONFLICT",
-                "The Guardian policy was modified by another request",
-            )
-        try:
-            parsed_field = GuardianFieldName(field_name)
-            parsed_owner = GuardianFieldOwner(owner)
-        except ValueError as exc:
-            raise ServiceError(
-                "VALIDATION_ERROR",
-                "field_name or owner is invalid",
-            ) from exc
-        if parsed_owner not in {GuardianFieldOwner.HUMAN, GuardianFieldOwner.GUARDIAN}:
-            raise ServiceError(
-                "VALIDATION_ERROR",
-                "owner must be HUMAN or GUARDIAN",
-            )
-        channel = await self.repository.get_channel(channel_id)
-        if channel is None:
-            raise ServiceError("CHANNEL_NOT_FOUND", "The Guardian channel does not exist")
-        previous = await self.repository.get_field_ownership(channel_id, parsed_field)
-        details = cast(dict[str, Any], channel.get("details") or {})
-        current_values: dict[GuardianFieldName, object] = {
-            GuardianFieldName.SCHEDULABLE: channel["upstream_schedulable"],
-            GuardianFieldName.PRIORITY: details.get("baseline_priority"),
-            GuardianFieldName.LOAD_FACTOR: details.get("desired_load_factor"),
-        }
-        value = GuardianFieldOwnership(
-            channel_id=channel_id,
-            field_name=parsed_field,
-            owner=parsed_owner,
-            baseline_value=(
-                previous.baseline_value
-                if previous is not None
-                else cast(int | float | bool | str | None, current_values[parsed_field])
-            ),
-            last_guardian_value=(
-                previous.last_guardian_value if previous is not None else None
-            ),
-            last_write_at=previous.last_write_at if previous is not None else None,
-        )
-        await self.repository.save_field_ownership(value)
-        previous_owner = (
-            previous.owner if previous is not None else GuardianFieldOwner.UPSTREAM
-        )
-        if self._metrics is not None and previous_owner is not parsed_owner:
-            self._metrics.guardian_field_ownership_changes.labels(
-                from_owner=previous_owner.value,
-                to_owner=parsed_owner.value,
-            ).inc()
-        await self.repository.add_event(
-            event_type="FIELD_OWNERSHIP_CHANGED",
-            severity="WARNING",
-            channel_id=channel_id,
-            group_id=cast(str | None, channel.get("group_id")),
-            message=(
-                f"{channel.get('name') or channel_id}: {parsed_field.value} ownership "
-                f"changed to {parsed_owner.value}"
-            ),
-            details={
-                "field_name": parsed_field.value,
-                "from_owner": previous_owner.value,
-                "to_owner": parsed_owner.value,
-            },
-        )
-        await self._notify_control_event(
-            "Guardian 字段归属已变更",
-            [
-                f"渠道：{channel.get('name') or channel_id}"
-                f"（分组 {channel.get('group_id') or '未分组'}）",
-                f"字段：{parsed_field.value}",
-                f"归属：{previous_owner.value} → {parsed_owner.value}",
-                "实际写回：否",
-                "原因：管理员显式调整字段控制权",
-            ],
-            coalesce_key=(
-                f"guardian:ownership:{channel_id}:{parsed_field.value}"
-            ),
-        )
-        return value.model_dump(mode="json")
 
     async def probe_budget(self) -> dict[str, Any]:
         now = datetime.now(ZoneInfo("Asia/Shanghai"))

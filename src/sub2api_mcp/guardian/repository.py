@@ -29,8 +29,6 @@ from .contracts import (
     GuardianChannelErrorEpisode,
     GuardianEvidence,
     GuardianEvidenceBucket,
-    GuardianFieldName,
-    GuardianFieldOwnership,
     GuardianFreshness,
     GuardianHealth,
     GuardianPolicy,
@@ -41,7 +39,7 @@ from .contracts import (
     UpstreamProbeSnapshot,
 )
 
-GUARDIAN_SCHEMA_VERSION = 9
+GUARDIAN_SCHEMA_VERSION = 10
 
 GUARDIAN_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS guardian_metadata (
@@ -133,18 +131,6 @@ CREATE TABLE IF NOT EXISTS guardian_events (
 );
 CREATE INDEX IF NOT EXISTS idx_guardian_events_created
     ON guardian_events(created_at DESC, event_id DESC);
-CREATE TABLE IF NOT EXISTS guardian_write_audits (
-    audit_id TEXT PRIMARY KEY,
-    run_id TEXT,
-    channel_id TEXT,
-    action TEXT NOT NULL,
-    before_json TEXT,
-    after_json TEXT,
-    reason TEXT NOT NULL,
-    idempotency_key TEXT UNIQUE,
-    outcome TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
 CREATE TABLE IF NOT EXISTS guardian_probe_ledger (
     ledger_id TEXT PRIMARY KEY,
     channel_id TEXT,
@@ -202,17 +188,6 @@ CREATE TABLE IF NOT EXISTS guardian_traffic_buckets (
 );
 CREATE INDEX IF NOT EXISTS idx_guardian_traffic_buckets_recent
     ON guardian_traffic_buckets(bucket_at DESC, channel_id);
-CREATE TABLE IF NOT EXISTS guardian_field_ownership (
-    channel_id TEXT NOT NULL,
-    account_id TEXT NOT NULL DEFAULT '*',
-    field_name TEXT NOT NULL,
-    owner TEXT NOT NULL,
-    baseline_json TEXT,
-    last_guardian_json TEXT,
-    last_write_at TEXT,
-    updated_at TEXT NOT NULL,
-    PRIMARY KEY(channel_id, account_id, field_name)
-);
 """
 
 GUARDIAN_ACCOUNT_RECOVERY_SCHEMA_SQL = """
@@ -302,8 +277,6 @@ CREATE INDEX IF NOT EXISTS idx_guardian_closed_episodes_retention
     ON guardian_channel_error_episodes(updated_at, episode_id) WHERE status = 'CLOSED';
 CREATE INDEX IF NOT EXISTS idx_guardian_recovery_runs_retention
     ON guardian_account_recovery_runs(updated_at, run_id) WHERE status <> 'RUNNING';
-CREATE INDEX IF NOT EXISTS idx_guardian_write_audits_created
-    ON guardian_write_audits(created_at, audit_id);
 CREATE INDEX IF NOT EXISTS idx_guardian_probe_ledger_occurred
     ON guardian_probe_ledger(occurred_at, ledger_id);
 CREATE INDEX IF NOT EXISTS idx_guardian_idempotency_created
@@ -411,6 +384,8 @@ class GuardianRepository:
                 self._migrate_v7_to_v8_sync(connection, now=now)
             if current_version < 9:
                 self._migrate_v8_to_v9_sync(connection)
+            if current_version < 10:
+                self._migrate_v9_to_v10_sync(connection)
             connection.execute(
                 "INSERT INTO guardian_metadata(key, value) VALUES('schema_version', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -558,7 +533,7 @@ class GuardianRepository:
             row["name"]
             for row in connection.execute("PRAGMA table_info(guardian_field_ownership)").fetchall()
         }
-        if "account_id" in columns:
+        if not columns or "account_id" in columns:
             return
         connection.execute(
             "ALTER TABLE guardian_field_ownership RENAME TO guardian_field_ownership_v4"
@@ -608,10 +583,6 @@ class GuardianRepository:
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_guardian_account_observations_retention "
             "ON guardian_account_observations(observed_at, snapshot_id, account_id)"
-        )
-        connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_guardian_write_audits_created "
-            "ON guardian_write_audits(created_at, audit_id)"
         )
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_guardian_probe_ledger_occurred "
@@ -742,6 +713,13 @@ class GuardianRepository:
         )
 
     @staticmethod
+    def _migrate_v9_to_v10_sync(connection: sqlite3.Connection) -> None:
+        """Drop the removed weight-writeback tables from retired schemas."""
+
+        connection.execute("DROP TABLE IF EXISTS guardian_field_ownership")
+        connection.execute("DROP TABLE IF EXISTS guardian_write_audits")
+
+    @staticmethod
     def _ensure_column_sync(
         connection: sqlite3.Connection,
         table: str,
@@ -767,134 +745,6 @@ class GuardianRepository:
         data = cast(dict[str, Any], json.loads(row["policy_json"]))
         data["revision"] = int(row["revision"])
         return GuardianPolicy.model_validate(data)
-
-    async def get_field_ownership(
-        self,
-        channel_id: str,
-        field_name: GuardianFieldName,
-        *,
-        account_id: str | None = None,
-    ) -> GuardianFieldOwnership | None:
-        return await asyncio.to_thread(
-            self._get_field_ownership_sync,
-            channel_id,
-            field_name,
-            account_id,
-        )
-
-    def _get_field_ownership_sync(
-        self,
-        channel_id: str,
-        field_name: GuardianFieldName,
-        account_id: str | None,
-    ) -> GuardianFieldOwnership | None:
-        with self._connect() as connection:
-            if account_id is None:
-                row = connection.execute(
-                    "SELECT * FROM guardian_field_ownership "
-                    "WHERE channel_id = ? AND account_id = '*' AND field_name = ?",
-                    (channel_id, field_name.value),
-                ).fetchone()
-            else:
-                row = connection.execute(
-                    "SELECT * FROM guardian_field_ownership "
-                    "WHERE channel_id = ? AND account_id IN (?, '*') "
-                    "AND field_name = ? "
-                    "ORDER BY CASE WHEN account_id = ? THEN 0 ELSE 1 END LIMIT 1",
-                    (channel_id, account_id, field_name.value, account_id),
-                ).fetchone()
-        if row is None:
-            return None
-        return GuardianFieldOwnership(
-            channel_id=row["channel_id"],
-            account_id=(None if row["account_id"] == "*" else row["account_id"]),
-            field_name=row["field_name"],
-            owner=row["owner"],
-            baseline_value=(json.loads(row["baseline_json"]) if row["baseline_json"] else None),
-            last_guardian_value=(
-                json.loads(row["last_guardian_json"]) if row["last_guardian_json"] else None
-            ),
-            last_write_at=_dt(row["last_write_at"]),
-        )
-
-    async def save_field_ownership(self, value: GuardianFieldOwnership) -> None:
-        await asyncio.to_thread(self._save_field_ownership_sync, value)
-
-    def _save_field_ownership_sync(self, value: GuardianFieldOwnership) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                "INSERT INTO guardian_field_ownership"
-                "(channel_id, account_id, field_name, owner, baseline_json, "
-                "last_guardian_json, last_write_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(channel_id, account_id, field_name) DO UPDATE SET "
-                "owner = excluded.owner, baseline_json = excluded.baseline_json, "
-                "last_guardian_json = excluded.last_guardian_json, "
-                "last_write_at = excluded.last_write_at, updated_at = excluded.updated_at",
-                (
-                    value.channel_id,
-                    value.account_id or "*",
-                    value.field_name.value,
-                    value.owner.value,
-                    _json(value.baseline_value),
-                    (
-                        _json(value.last_guardian_value)
-                        if value.last_guardian_value is not None
-                        else None
-                    ),
-                    _iso(value.last_write_at) if value.last_write_at is not None else None,
-                    _iso(self._clock()),
-                ),
-            )
-
-    async def add_write_audit(
-        self,
-        *,
-        channel_id: str,
-        action: str,
-        before: object,
-        after: object,
-        reason: str,
-        idempotency_key: str,
-        outcome: str,
-    ) -> None:
-        await asyncio.to_thread(
-            self._add_write_audit_sync,
-            channel_id,
-            action,
-            before,
-            after,
-            reason,
-            idempotency_key,
-            outcome,
-        )
-
-    def _add_write_audit_sync(
-        self,
-        channel_id: str,
-        action: str,
-        before: object,
-        after: object,
-        reason: str,
-        idempotency_key: str,
-        outcome: str,
-    ) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                "INSERT OR IGNORE INTO guardian_write_audits"
-                "(audit_id, channel_id, action, before_json, after_json, reason, "
-                "idempotency_key, outcome, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    str(uuid.uuid4()),
-                    channel_id,
-                    action[:64],
-                    _json(before),
-                    _json(after),
-                    reason[:500],
-                    idempotency_key,
-                    outcome[:32],
-                    _iso(self._clock()),
-                ),
-            )
 
     async def pending_input_snapshot_count(self) -> int:
         return await asyncio.to_thread(self._pending_input_snapshot_count_sync)
@@ -2795,7 +2645,6 @@ class GuardianRepository:
         policy = await self.get_policy()
         return {
             "enabled": policy.enabled,
-            "scheduling_mode": policy.scheduling_mode.value,
             "policy_revision": policy.revision,
             "channel_count": counts["channel_count"],
             "group_count": counts["group_count"],
@@ -2863,31 +2712,6 @@ class GuardianRepository:
                 row["freshness_state"]: int(row["count"]) for row in freshness
             },
         }
-
-    async def list_field_ownership(self) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(self._list_field_ownership_sync)
-
-    def _list_field_ownership_sync(self) -> list[dict[str, Any]]:
-        with self._connect() as connection:
-            rows = connection.execute(
-                "SELECT * FROM guardian_field_ownership ORDER BY channel_id, field_name"
-            ).fetchall()
-        return [
-            {
-                "channel_id": row["channel_id"],
-                "account_id": None if row["account_id"] == "*" else row["account_id"],
-                "field_name": row["field_name"],
-                "owner": row["owner"],
-                "baseline_value": (
-                    json.loads(row["baseline_json"]) if row["baseline_json"] else None
-                ),
-                "last_guardian_value": (
-                    json.loads(row["last_guardian_json"]) if row["last_guardian_json"] else None
-                ),
-                "last_write_at": row["last_write_at"],
-            }
-            for row in rows
-        ]
 
     async def record_recovery_probe(
         self,
@@ -3022,13 +2846,11 @@ class GuardianRepository:
             "recovery": _iso(now - timedelta(days=90)),
             "samples": _iso(now - timedelta(days=90)),
             "snapshots": _iso(now - timedelta(days=90)),
-            "audits": _iso(now - timedelta(days=365)),
         }
         counts = {
             "account_observations": 0,
             "runs": 0,
             "events": 0,
-            "write_audits": 0,
             "probe_ledger": 0,
             "closed_episodes": 0,
             "recovery_runs": 0,
@@ -3090,13 +2912,6 @@ class GuardianRepository:
                 "(SELECT rowid FROM guardian_events WHERE created_at < ? "
                 "ORDER BY created_at LIMIT ?)",
                 (cutoffs["events"],),
-            )
-            execute_bounded(
-                "write_audits",
-                "DELETE FROM guardian_write_audits WHERE rowid IN "
-                "(SELECT rowid FROM guardian_write_audits WHERE created_at < ? "
-                "ORDER BY created_at LIMIT ?)",
-                (cutoffs["audits"],),
             )
             execute_bounded(
                 "probe_ledger",
@@ -3181,7 +2996,6 @@ class GuardianRepository:
                 "account_observations",
                 "runs",
                 "events",
-                "write_audits",
                 "probe_ledger",
                 "closed_episodes",
                 "recovery_runs",

@@ -46,32 +46,6 @@ class AccountDispatchState:
 
 
 @dataclass(frozen=True, slots=True)
-class AccountSchedulingState:
-    account_id: str
-    success: bool
-    status: str = ""
-    schedulable: bool | None = None
-    priority: int | None = None
-    load_factor: int | None = None
-    concurrency: int | None = None
-    effective_load_factor: int | None = None
-    expired: bool = False
-    temporary_unavailable: bool = False
-    automatic_pause: bool = False
-
-
-@dataclass(frozen=True, slots=True)
-class AccountSchedulingWriteResult:
-    account_id: str
-    field_name: str
-    success: bool
-    before_value: int | bool | None = None
-    verified_value: int | bool | None = None
-    reason: str = ""
-    state_uncertain: bool = False
-
-
-@dataclass(frozen=True, slots=True)
 class UsageLogRecord:
     account_id: str
     created_at: datetime

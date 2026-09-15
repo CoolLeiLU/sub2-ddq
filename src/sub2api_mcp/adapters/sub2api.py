@@ -40,10 +40,8 @@ from ..guardian.contracts import (
     AccountTestExecutionResult,
     GuardianAccountMutationOutcome,
     GuardianAccountObservation,
-    GuardianAccountSchedulingState,
     GuardianAccountStatus,
     GuardianAccountTestOutcome,
-    GuardianFieldName,
     UpstreamProbeSnapshot,
 )
 
@@ -501,52 +499,6 @@ class LegacySub2APIAdapter:
             ),
             reason=disabled.reason,
             attempted=True,
-        )
-
-    async def write_field(
-        self,
-        account_id: str,
-        field_name: GuardianFieldName,
-        value: object,
-    ) -> int | bool:
-        """Write one verified Sub2API account field.
-
-        ``account_id`` is deliberately account-scoped. Callers must resolve Guardian monitor and
-        group identities before entering this boundary.
-        """
-        result = await self._client.write_account_scheduling_field(
-            account_id,
-            field_name.value.casefold(),
-            value,
-        )
-        if not result.success:
-            raise RuntimeError("Guardian account scheduling field write failed")
-        verified = result.verified_value
-        if isinstance(verified, (bool, int)):
-            return verified
-        raise RuntimeError("Guardian account scheduling verification is missing")
-
-    async def read_account_scheduling_state(
-        self,
-        account_id: str,
-    ) -> GuardianAccountSchedulingState:
-        state = await self._client.fetch_account_scheduling_state(account_id)
-        return GuardianAccountSchedulingState(
-            account_id=state.account_id,
-            success=state.success,
-            status=(
-                AccountObservationStatus(state.status)
-                if state.success
-                else None
-            ),
-            schedulable=state.schedulable,
-            priority=state.priority,
-            load_factor=state.load_factor,
-            concurrency=state.concurrency,
-            effective_load_factor=state.effective_load_factor,
-            expired=state.expired,
-            temporary_unavailable=state.temporary_unavailable,
-            automatic_pause=state.automatic_pause,
         )
 
     @staticmethod

@@ -14,18 +14,17 @@ const pageMeta = {
   groups: ["分组调度", "分组健康、可用池与独立策略覆盖"],
   channels: ["渠道池", "渠道评分、状态和人工控制"],
   recovery: ["账号恢复", "异常账号、开放故障事件与恢复任务"],
-  routing: ["实时路由", "当前状态与候选调度结果对比"],
+  routing: ["实时路由", "当前状态与期望调度状态对比"],
   spend: ["探测费用", "主动探测 token 与成本估算"],
   guide: ["调度说明", "评分、熔断、保底、降级和回池规则"],
   events: ["事件日志", "运行、状态迁移和人工操作审计"],
   policy: ["策略配置", "全局规则、系统参数与守护范围"],
-  connection: ["连接设置", "上游、API、存储和写回适配器状态"],
+  connection: ["连接设置", "上游、API 和存储状态"],
   info: ["信息与通知", "版本信息和 LangBot 全渠道通知说明"],
 };
 
 const policyFields = [
   ["#p-scan", "scan_interval_seconds", "number"],
-  ["#p-strategy", "strategy", "string"],
   ["#p-sampling-mode", "sampling.mode", "string"],
   ["#p-snapshot-interval", "sampling.shared_snapshot_interval_seconds", "number"],
   ["#p-bucket-seconds", "sampling.bucket_seconds", "number"],
@@ -52,19 +51,12 @@ const policyFields = [
   ["#p-short-half-life", "scoring.short_half_life_minutes", "number"],
   ["#p-long-half-life", "scoring.long_half_life_minutes", "number"],
   ["#p-confidence-degrade", "confidence.degrade_min", "number"],
-  ["#p-confidence-weight", "confidence.weight_min", "number"],
   ["#p-confidence-fuse", "confidence.fuse_min", "number"],
   ["#p-confidence-recover", "confidence.recover_min", "number"],
   ["#p-traffic-enabled", "traffic.enabled", "boolean"],
   ["#p-traffic-refresh", "traffic.refresh_seconds", "number"],
   ["#p-traffic-lookback", "traffic.lookback_minutes", "number"],
   ["#p-traffic-max-samples", "traffic.max_samples_per_channel", "number"],
-  ["#p-write-max-channels", "writes.max_channels_per_run", "number"],
-  ["#p-write-load-cooldown", "writes.load_cooldown_seconds", "number"],
-  ["#p-write-priority-cooldown", "writes.priority_cooldown_seconds", "number"],
-  ["#p-write-max-step", "writes.max_relative_step", "number"],
-  ["#p-write-min-change", "writes.min_relative_change", "number"],
-  ["#p-write-min-absolute", "writes.min_absolute_change", "number"],
   ["#score-perfect", "scoring.event_scores.PERFECT", "number"],
   ["#score-slow", "scoring.event_scores.SLOW_TTFB", "number"],
   ["#score-unknown", "scoring.event_scores.UPSTREAM_UNKNOWN", "number"],
@@ -82,17 +74,9 @@ const policyFields = [
   ["#p-min-score", "breaker.min_pool_score", "number"],
   ["#p-latency-threshold", "breaker.latency_ttfb_ms", "number"],
   ["#p-degrade-score", "degrade.score_threshold", "number"],
-  ["#p-degrade-ratio", "degrade.load_factor_ratio", "number"],
-  ["#p-priority-step", "degrade.priority_step", "number"],
   ["#p-recovery-score", "recovery.target_score", "number"],
   ["#p-recovery-count", "recovery.success_count", "number"],
   ["#p-recovery-hold", "recovery.hold_seconds", "number"],
-  ["#p-weight-budget", "weights.budget", "number"],
-  ["#p-weight-gate", "weights.gate_floor", "number"],
-  ["#p-balance-ratio", "weights.balanced_price_ratio", "number"],
-  ["#p-change-threshold", "weights.change_threshold", "number"],
-  ["#p-weight-cooldown", "weights.cooldown_seconds", "number"],
-  ["#p-max-load", "weights.max_load_factor", "number"],
   ["#p-group-mode", "scope.managed_group_mode", "string"],
   ["#p-managed-groups", "scope.managed_group_ids", "set"],
   ["#p-excluded-groups", "scope.excluded_group_ids", "set"],
@@ -279,20 +263,20 @@ async function refreshPage(page = currentPage) {
 
 async function loadStatus() {
   const status = await api("/status");
-  const enabledLabel = status.enabled ? "直接调度运行中" : "直接调度已停止";
+  const enabledLabel = status.enabled ? "健康守护运行中" : "健康守护已停止";
   $("#metric-engine").textContent = enabledLabel;
-  $("#sidebar-status").textContent = status.enabled ? "直接调度运行中" : "调度已停止";
-  $("#mode-label").textContent = status.enabled ? "直接调度" : "调度已停止";
-  $("#info-mode").textContent = status.enabled ? "直接调度运行中" : "直接调度已停止";
+  $("#sidebar-status").textContent = status.enabled ? "健康守护运行中" : "调度已停止";
+  $("#mode-label").textContent = status.enabled ? "健康守护" : "调度已停止";
+  $("#info-mode").textContent = status.enabled ? "健康守护运行中" : "健康守护已停止";
   $("#sidebar-dot").style.background = status.enabled ? "var(--green)" : "var(--amber)";
   $("#scheduling-start").hidden = status.enabled;
   $("#scheduling-stop").hidden = !status.enabled;
   const notice = $("#scheduling-notice");
   notice.className = `notice ${status.enabled ? "info" : "safe"}`;
-  $("#scheduling-notice-title").textContent = status.enabled ? "直接调度运行中" : "直接调度已停止";
+  $("#scheduling-notice-title").textContent = status.enabled ? "健康守护运行中" : "健康守护已停止";
   $("#scheduling-notice-copy").textContent = status.enabled
-    ? "写入器已就绪；仅对唯一映射、证据新鲜且归属明确的账号执行有界写入。"
-    : "启动后将执行当前读、单字段写和精确回读；任何验证失败都会停止剩余任务。";
+    ? "健康评估与账号恢复已就绪；异常账号按冷却账本探测并验证恢复。"
+    : "启动后将执行健康评估与账号恢复；人工暂停与排除项永不自动恢复。";
   const policyBadge = $("#policy-scheduling-state");
   if (policyBadge) {
     policyBadge.textContent = status.enabled ? "运行中" : "已停止";
@@ -371,10 +355,10 @@ async function loadRecovery() {
 }
 
 async function setScheduling(enabled) {
-  const action = enabled ? "启动直接调度" : "紧急停止直接调度";
+  const action = enabled ? "启动健康守护" : "紧急停止健康守护";
   const warning = enabled
-    ? "启用后会对符合安全条件的账号执行真实写入。"
-    : "停止后未开始的写入和账号恢复会立即被阻断。";
+    ? "启用后会对符合安全条件的账号执行真实恢复写入。"
+    : "停止后未开始的账号恢复会立即被阻断。";
   if (!window.confirm(`${action}？\n\n${warning}`)) return;
   const policy = (await api("/policy")).policy;
   const button = enabled ? $("#scheduling-start") : $("#scheduling-stop");
@@ -469,7 +453,6 @@ function renderLastRun(run) {
         ["评估渠道", run.result?.channels_evaluated ?? "—"],
         ["状态转换", run.result?.state_transitions ?? "—"],
         ["预期差异", run.result?.expected_changes ?? "—"],
-        ["实际写入", run.result?.writes_applied ?? 0],
       ]
     : [["状态", "尚未运行"]];
   for (const [label, value] of values) {
@@ -536,9 +519,7 @@ function openGroupDialog(group) {
   const policy = group.override?.policy || {};
   $("#group-id").value = group.group_id;
   $("#group-dialog-title").textContent = `${group.name} · 策略覆盖`;
-  $("#group-strategy").value = policy.strategy || "";
   $("#group-min-pool").value = policy.min_pool_size ?? "";
-  $("#group-budget").value = policy.weight_budget ?? "";
   $("#group-probe-interval").value = policy.probe_interval_seconds ?? "";
   $("#group-clear").hidden = !group.override;
   $("#group-dialog").showModal();
@@ -547,13 +528,9 @@ function openGroupDialog(group) {
 async function saveGroupPolicy() {
   const groupId = $("#group-id").value;
   const patch = {};
-  const strategy = $("#group-strategy").value;
   const minPool = $("#group-min-pool").value;
-  const budget = $("#group-budget").value;
   const interval = $("#group-probe-interval").value;
-  if (strategy) patch.strategy = strategy;
   if (minPool !== "") patch.min_pool_size = Number(minPool);
-  if (budget !== "") patch.weight_budget = Number(budget);
   if (interval !== "") patch.probe_interval_seconds = Number(interval);
   await api(`/groups/${encodeURIComponent(groupId)}/policy`, {
     method: "PATCH",
@@ -696,12 +673,7 @@ async function showChannel(channelId) {
   root.append(samples);
   const override = channel.override || {};
   $("#channel-settings-id").value = channel.channel_id;
-  $("#channel-priority").value = override.priority ?? "";
-  $("#channel-load-factor").value = override.load_factor ?? "";
-  $("#channel-concurrency").value = override.concurrency ?? "";
-  $("#channel-multiplier").value = override.schedule_multiplier ?? "";
   $("#channel-probe-model").value = override.probe_model ?? "";
-  $("#channel-unboost").hidden = !override.boost_until;
   const dialog = $("#channel-dialog");
   if (!dialog.open) dialog.showModal();
 }
@@ -709,35 +681,14 @@ async function showChannel(channelId) {
 async function saveChannelSettings(event) {
   event.preventDefault();
   const channelId = $("#channel-settings-id").value;
-  const nullableNumber = (selector) => {
-    const value = $(selector).value;
-    return value === "" ? null : Number(value);
-  };
   await api(`/channels/${encodeURIComponent(channelId)}`, {
     method: "PATCH",
     headers: { "Idempotency-Key": `ui:channel:${channelId}:${Date.now()}` },
     body: {
-      priority: nullableNumber("#channel-priority"),
-      load_factor: nullableNumber("#channel-load-factor"),
-      concurrency: nullableNumber("#channel-concurrency"),
-      schedule_multiplier: nullableNumber("#channel-multiplier"),
       probe_model: $("#channel-probe-model").value.trim() || null,
     },
   });
   toast("渠道覆盖参数已保存");
-  await showChannel(channelId);
-  if (currentPage === "channels") await loadChannels();
-}
-
-async function boostChannel(action) {
-  const channelId = $("#channel-settings-id").value;
-  const minutes = Number($("#channel-boost-minutes").value);
-  await api(`/channels/${encodeURIComponent(channelId)}/actions`, {
-    method: "POST",
-    headers: { "Idempotency-Key": `ui:${action}:${channelId}:${Date.now()}` },
-    body: action === "boost" ? { action, minutes } : { action },
-  });
-  toast(action === "boost" ? `火箭已启动 ${minutes} 分钟` : "火箭已取消");
   await showChannel(channelId);
   if (currentPage === "channels") await loadChannels();
 }
@@ -755,17 +706,15 @@ async function loadRouting() {
     cell(row, make("span", "score-value", formatNumber(item.score)));
     cell(row, booleanBadge(item.upstream_schedulable));
     cell(row, booleanBadge(item.desired_schedulable));
-    cell(row, item.candidate_weight == null ? "—" : formatNumber(item.candidate_weight, 2));
     cell(row, make("span", `badge ${item.expected_action === "NO_CHANGE" ? "success" : "warning"}`, item.expected_action || "—"));
     body.append(row);
   }
 }
 
 async function loadSpend() {
-  const [data, budget, ownership, policyData] = await Promise.all([
+  const [data, budget, policyData] = await Promise.all([
     api("/probe-spend"),
     api("/probe-budget"),
-    api("/write-ownership"),
     api("/policy"),
   ]);
   policyState = policyData.policy;
@@ -776,55 +725,6 @@ async function loadSpend() {
   $("#probe-budget-tokens").textContent = `${budget.total_tokens || 0} / ${budget.daily_token_limit || 0}`;
   $("#probe-budget-blocked").textContent = budget.blocked_count || 0;
   $("#probe-budget-state").textContent = budget.enabled ? "预算已启用" : "预算关闭";
-  renderOwnership(ownership.items || []);
-}
-
-function renderOwnership(items) {
-  const body = $("#ownership-table");
-  body.replaceChildren();
-  $("#ownership-empty").hidden = items.length > 0;
-  for (const item of items) {
-    const row = make("tr");
-    cell(row, item.channel_id);
-    cell(row, item.field_name);
-    cell(row, make("span", `badge ${item.owner === "HUMAN" ? "warning" : "success"}`, item.owner === "HUMAN" ? "人工接管" : "Guardian"));
-    cell(row, formatFieldValue(item.baseline_value));
-    cell(row, formatFieldValue(item.last_guardian_value));
-    cell(row, formatDate(item.last_write_at));
-    const actions = make("div", "table-actions");
-    const owner = item.owner === "HUMAN" ? "GUARDIAN" : "HUMAN";
-    const label = owner === "GUARDIAN" ? "交还 Guardian" : "人工接管";
-    const button = make("button", `table-action${owner === "HUMAN" ? " danger" : ""}`, label);
-    button.type = "button";
-    button.addEventListener("click", () => {
-      changeOwnership(item, owner).catch((error) => toast(error.message, true));
-    });
-    actions.append(button);
-    cell(row, actions);
-    body.append(row);
-  }
-}
-
-async function changeOwnership(item, owner) {
-  if (!policyState) return;
-  const label = owner === "GUARDIAN" ? "交还 Guardian" : "切换为人工接管";
-  if (!window.confirm(`确认将渠道 ${item.channel_id} 的 ${item.field_name} ${label}吗？`)) return;
-  await api(`/channels/${encodeURIComponent(item.channel_id)}/ownership`, {
-    method: "POST",
-    headers: {
-      "If-Match": String(policyState.revision),
-      "Idempotency-Key": `ui:ownership:${item.channel_id}:${item.field_name}:${owner}:${Date.now()}`,
-    },
-    body: { field_name: item.field_name, owner },
-  });
-  toast(`字段归属已更新为 ${owner}`);
-  await loadSpend();
-}
-
-function formatFieldValue(value) {
-  if (value == null) return "—";
-  if (typeof value === "object") return JSON.stringify(value);
-  return String(value);
 }
 
 async function loadEvents(reset = false) {
@@ -910,10 +810,7 @@ async function savePolicy(event) {
 }
 
 async function loadConnection() {
-  const status = await loadStatus();
-  const healthy = status.writeback_adapter === "verified_account_fields";
-  $("#connection-writer").textContent = healthy ? "已就绪" : "不可用";
-  $("#connection-writer").className = `badge ${healthy ? "success" : "warning"}`;
+  await loadStatus();
 }
 
 async function runCycle(source) {
@@ -990,12 +887,6 @@ $("#group-clear").addEventListener("click", () => clearGroupPolicy().catch((erro
 $("#close-channel-dialog").addEventListener("click", () => $("#channel-dialog").close());
 $("#channel-settings").addEventListener("submit", (event) => {
   saveChannelSettings(event).catch((error) => toast(error.message, true));
-});
-$("#channel-boost").addEventListener("click", () => {
-  boostChannel("boost").catch((error) => toast(error.message, true));
-});
-$("#channel-unboost").addEventListener("click", () => {
-  boostChannel("unboost").catch((error) => toast(error.message, true));
 });
 $("#policy-form").addEventListener("submit", savePolicy);
 $("#policy-form").addEventListener("input", () => {

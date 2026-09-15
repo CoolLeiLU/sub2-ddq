@@ -29,11 +29,8 @@ class Metrics:
     guardian_channel_confidence_min: Gauge
     guardian_channel_confidence_average: Gauge
     guardian_channels_by_freshness: Gauge
-    guardian_write_frozen: Counter
     guardian_recovery_probe_requests: Counter
     guardian_recovery_probe_tokens: Counter
-    guardian_field_ownership_changes: Counter
-    guardian_scheduling_writes: Counter
     guardian_account_recovery_results: Counter
     retention_runs: Counter
     retention_rows: Counter
@@ -158,12 +155,6 @@ class Metrics:
                 ("state",),
                 registry=registry,
             ),
-            guardian_write_frozen=Counter(
-                "guardian_write_frozen_total",
-                "Guardian write recommendations frozen by reason",
-                ("reason",),
-                registry=registry,
-            ),
             guardian_recovery_probe_requests=Counter(
                 "guardian_recovery_probe_requests_total",
                 "Guardian recovery probe request results",
@@ -174,18 +165,6 @@ class Metrics:
                 "guardian_recovery_probe_tokens_total",
                 "Guardian recovery probe tokens",
                 ("priced",),
-                registry=registry,
-            ),
-            guardian_field_ownership_changes=Counter(
-                "guardian_field_ownership_changes_total",
-                "Guardian field ownership transitions",
-                ("from_owner", "to_owner"),
-                registry=registry,
-            ),
-            guardian_scheduling_writes=Counter(
-                "guardian_scheduling_writes_total",
-                "Verified Guardian scheduling field outcomes",
-                ("field", "outcome"),
                 registry=registry,
             ),
             guardian_account_recovery_results=Counter(

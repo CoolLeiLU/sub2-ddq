@@ -106,33 +106,6 @@ class GuardianAccountMutationOutcome(StrictModel):
     attempted: bool = False
 
 
-class GuardianAccountSchedulingState(StrictModel):
-    account_id: str = Field(pattern=r"^[1-9][0-9]{0,19}$")
-    success: bool
-    status: AccountObservationStatus | None = None
-    schedulable: bool | None = None
-    priority: int | None = Field(default=None, ge=0, le=1_000_000)
-    load_factor: int | None = Field(default=None, ge=0, le=10_000)
-    concurrency: int | None = Field(default=None, ge=0, le=1_000_000)
-    effective_load_factor: int | None = Field(default=None, ge=1, le=1_000_000)
-    expired: bool = False
-    temporary_unavailable: bool = False
-    automatic_pause: bool = False
-
-    @model_validator(mode="after")
-    def validate_successful_scheduling_state(self) -> GuardianAccountSchedulingState:
-        required = (
-            self.status,
-            self.schedulable,
-            self.priority,
-            self.concurrency,
-            self.effective_load_factor,
-        )
-        if self.success and any(value is None for value in required):
-            raise ValueError("successful scheduling state requires every routing field")
-        return self
-
-
 class ChannelErrorEpisodeStatus(StrEnum):
     OPEN = "OPEN"
     CLOSED = "CLOSED"
@@ -244,24 +217,10 @@ class GuardianFreshness(StrEnum):
     EXPIRED = "EXPIRED"
 
 
-class GuardianFieldName(StrEnum):
-    LOAD_FACTOR = "LOAD_FACTOR"
-    PRIORITY = "PRIORITY"
-    SCHEDULABLE = "SCHEDULABLE"
-
-
 class GuardianFieldOwner(StrEnum):
     UPSTREAM = "UPSTREAM"
     HUMAN = "HUMAN"
     GUARDIAN = "GUARDIAN"
-
-
-class GuardianWriteOutcome(StrEnum):
-    DRY_RUN = "DRY_RUN"
-    NO_CHANGE = "NO_CHANGE"
-    BLOCKED = "BLOCKED"
-    APPLIED = "APPLIED"
-    FAILED = "FAILED"
 
 
 class GuardianHealth(StrEnum):
@@ -283,16 +242,6 @@ class ManualControl(StrEnum):
     PAUSED = "PAUSED"
     EXCLUDED = "EXCLUDED"
     FUSED = "FUSED"
-
-
-class GuardianStrategy(StrEnum):
-    PRICE = "PRICE"
-    SPEED = "SPEED"
-    BALANCED = "BALANCED"
-
-
-class GuardianSchedulingMode(StrEnum):
-    DIRECT = "DIRECT"
 
 
 class ScoringPolicy(StrictModel):
@@ -374,9 +323,6 @@ class BreakerPolicy(StrictModel):
 class DegradePolicy(StrictModel):
     enabled: bool = True
     score_threshold: float = Field(default=75, ge=0, le=100)
-    priority_step: int = Field(default=1, ge=1, le=4)
-    load_factor_ratio: float = Field(default=0.5, ge=0.05, le=1)
-    min_load_factor: int = Field(default=1, ge=1, le=100000)
 
 
 class RecoveryPolicy(StrictModel):
@@ -385,26 +331,6 @@ class RecoveryPolicy(StrictModel):
     target_score: float = Field(default=75, ge=0, le=100)
     success_count: int = Field(default=3, ge=1, le=1000)
     hold_seconds: int = Field(default=60, ge=0, le=86400)
-
-
-class WeightsPolicy(StrictModel):
-    enabled: bool = True
-    budget: float = Field(default=400, gt=0, le=1_000_000)
-    gate_floor: float = Field(default=40, ge=0, le=100)
-    balanced_price_ratio: float = Field(default=0.5, ge=0, le=1)
-    change_threshold: float = Field(default=0.1, ge=0.01, le=1)
-    cooldown_seconds: int = Field(default=60, ge=0, le=86400)
-    min_load_factor: int = Field(default=1, ge=1, le=100000)
-    max_load_factor: int = Field(default=100, ge=1, le=100000)
-    price_exp: float = Field(default=1, ge=0.1, le=10)
-    speed_exp: float = Field(default=1, ge=0.1, le=10)
-    confidence_exp: float = Field(default=1, ge=0.1, le=10)
-
-    @model_validator(mode="after")
-    def validate_load_bounds(self) -> WeightsPolicy:
-        if self.min_load_factor > self.max_load_factor:
-            raise ValueError("min_load_factor cannot exceed max_load_factor")
-        return self
 
 
 class ProbePolicy(StrictModel):
@@ -444,28 +370,16 @@ class SamplingPolicy(StrictModel):
 
 class ConfidencePolicy(StrictModel):
     degrade_min: float = Field(default=0.60, ge=0, le=1)
-    weight_min: float = Field(default=0.75, ge=0, le=1)
     fuse_min: float = Field(default=0.85, ge=0, le=1)
     recover_min: float = Field(default=0.85, ge=0, le=1)
 
     @model_validator(mode="after")
     def validate_threshold_order(self) -> ConfidencePolicy:
-        if self.degrade_min > self.weight_min:
-            raise ValueError("degrade_min cannot exceed weight_min")
-        if self.weight_min > self.fuse_min:
-            raise ValueError("weight_min cannot exceed fuse_min")
-        if self.weight_min > self.recover_min:
-            raise ValueError("weight_min cannot exceed recover_min")
+        if self.degrade_min > self.fuse_min:
+            raise ValueError("degrade_min cannot exceed fuse_min")
+        if self.fuse_min > self.recover_min:
+            raise ValueError("fuse_min cannot exceed recover_min")
         return self
-
-
-class WritePolicy(StrictModel):
-    max_channels_per_run: int = Field(default=1, ge=1, le=1000)
-    load_cooldown_seconds: int = Field(default=600, ge=0, le=86400)
-    priority_cooldown_seconds: int = Field(default=900, ge=0, le=86400)
-    max_relative_step: float = Field(default=0.20, gt=0, le=1)
-    min_relative_change: float = Field(default=0.15, ge=0, le=1)
-    min_absolute_change: int = Field(default=2, ge=0, le=1_000_000)
 
 
 class RecoveryProbeBudgetPolicy(StrictModel):
@@ -520,19 +434,15 @@ class ScopePolicy(StrictModel):
 class GuardianPolicy(StrictModel):
     revision: int = Field(default=1, ge=1)
     enabled: bool = False
-    scheduling_mode: GuardianSchedulingMode = GuardianSchedulingMode.DIRECT
     scan_interval_seconds: int = Field(default=15, ge=5, le=3600)
-    strategy: GuardianStrategy = GuardianStrategy.PRICE
     scoring: ScoringPolicy = Field(default_factory=ScoringPolicy)
     breaker: BreakerPolicy = Field(default_factory=BreakerPolicy)
     degrade: DegradePolicy = Field(default_factory=DegradePolicy)
     recovery: RecoveryPolicy = Field(default_factory=RecoveryPolicy)
-    weights: WeightsPolicy = Field(default_factory=WeightsPolicy)
     probe: ProbePolicy = Field(default_factory=ProbePolicy)
     traffic: TrafficPolicy = Field(default_factory=TrafficPolicy)
     sampling: SamplingPolicy = Field(default_factory=SamplingPolicy)
     confidence: ConfidencePolicy = Field(default_factory=ConfidencePolicy)
-    writes: WritePolicy = Field(default_factory=WritePolicy)
     recovery_budget: RecoveryProbeBudgetPolicy = Field(
         default_factory=RecoveryProbeBudgetPolicy
     )
@@ -547,9 +457,27 @@ class GuardianPolicy(StrictModel):
         if not isinstance(value, dict):
             return value
         migrated: dict[str, object] = dict(cast(dict[str, object], value))
-        for deprecated in ("observe_only", "auto_apply", "rollout"):
+        for deprecated in (
+            "observe_only",
+            "auto_apply",
+            "rollout",
+            "scheduling_mode",
+            "strategy",
+            "weights",
+            "writes",
+        ):
             migrated.pop(deprecated, None)
-        migrated["scheduling_mode"] = GuardianSchedulingMode.DIRECT.value
+        raw_degrade = migrated.get("degrade")
+        if isinstance(raw_degrade, dict):
+            degrade = dict(cast(dict[str, object], raw_degrade))
+            for key in ("priority_step", "load_factor_ratio", "min_load_factor"):
+                degrade.pop(key, None)
+            migrated["degrade"] = degrade
+        raw_confidence = migrated.get("confidence")
+        if isinstance(raw_confidence, dict):
+            confidence = dict(cast(dict[str, object], raw_confidence))
+            confidence.pop("weight_min", None)
+            migrated["confidence"] = confidence
         raw_probe = migrated.get("probe")
         probe: dict[str, object] = (
             dict(cast(dict[str, object], raw_probe))
@@ -678,42 +606,6 @@ class GuardianScoreV2(StrictModel):
         return self
 
 
-class GuardianFieldOwnership(StrictModel):
-    channel_id: str = Field(min_length=1, max_length=128)
-    account_id: str | None = Field(default=None, pattern=r"^[1-9][0-9]{0,19}$")
-    field_name: GuardianFieldName
-    owner: GuardianFieldOwner
-    baseline_value: int | float | bool | str | None = None
-    last_guardian_value: int | float | bool | str | None = None
-    last_write_at: datetime | None = None
-
-    @model_validator(mode="after")
-    def validate_last_write_at(self) -> GuardianFieldOwnership:
-        if self.last_write_at is not None and self.last_write_at.tzinfo is None:
-            raise ValueError("last_write_at must be timezone-aware")
-        return self
-
-
-class GuardianWriteProposal(StrictModel):
-    channel_id: str = Field(min_length=1, max_length=128)
-    account_id: str = Field(pattern=r"^[1-9][0-9]{0,19}$")
-    field_name: GuardianFieldName
-    current_value: int | float | bool | str
-    desired_value: int | float | bool | str
-    reason: str = Field(min_length=1, max_length=200)
-    idempotency_key: str = Field(min_length=1, max_length=128)
-
-
-class GuardianWriteDecision(StrictModel):
-    channel_id: str
-    account_id: str = Field(pattern=r"^[1-9][0-9]{0,19}$")
-    field_name: GuardianFieldName
-    outcome: GuardianWriteOutcome
-    current_value: int | float | bool | str
-    desired_value: int | float | bool | str
-    reason: str
-
-
 class ClassifiedSample(StrictModel):
     event_type: GuardianEventType
     score: int = Field(ge=0, le=100)
@@ -750,23 +642,6 @@ class ChannelDecision(StrictModel):
     should_probe: bool
     can_auto_recover: bool
     reason: str
-
-
-class WeightCandidate(StrictModel):
-    channel_id: str
-    score: float = Field(ge=0, le=100)
-    effective_rate: float | None = Field(default=None, ge=0)
-    ttfb_p95_ms: int | None = Field(default=None, ge=0)
-    schedule_multiplier: float = Field(default=1, ge=0, le=10_000)
-    confidence: float = Field(default=1, ge=0, le=1)
-    current_load_factor: int = Field(default=1, ge=0, le=1_000_000)
-
-
-class WeightAllocation(StrictModel):
-    target_load_factors: dict[str, int]
-    reserved_budget: int = Field(ge=0)
-    unallocated_budget: int = Field(ge=0)
-    blocked_reason: str | None = None
 
 
 class GuardianProbeTemplate(StrictModel):
@@ -854,23 +729,45 @@ class UpstreamProbeSnapshot(StrictModel):
 
 class GroupPolicyOverride(StrictModel):
     enabled: bool | None = None
-    strategy: GuardianStrategy | None = None
     min_pool_size: int | None = Field(default=None, ge=0, le=10_000)
-    weight_budget: float | None = Field(default=None, gt=0, le=1_000_000)
-    balanced_price_ratio: float | None = Field(default=None, ge=0, le=1)
     breaker_enabled: bool | None = None
     recovery_enabled: bool | None = None
-    weights_enabled: bool | None = None
     probe_enabled: bool | None = None
     probe_interval_seconds: int | None = Field(default=None, ge=30, le=86_400)
     probe_model: str | None = Field(default=None, max_length=200)
 
+    @model_validator(mode="before")
+    @classmethod
+    def drop_removed_fields(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        migrated = dict(cast(dict[str, object], value))
+        for removed in (
+            "strategy",
+            "weight_budget",
+            "balanced_price_ratio",
+            "weights_enabled",
+        ):
+            migrated.pop(removed, None)
+        return migrated
+
 
 class ChannelPolicyOverride(StrictModel):
-    priority: int | None = Field(default=None, ge=1, le=1_000_000)
-    load_factor: int | None = Field(default=None, ge=1, le=1_000_000)
-    concurrency: int | None = Field(default=None, ge=1, le=10_000)
-    schedule_multiplier: float | None = Field(default=None, ge=0, le=10_000)
     probe_model: str | None = Field(default=None, max_length=200)
-    boost_until: datetime | None = None
-    boost_load_delta: int | None = Field(default=None, ge=1, le=100_000)
+
+    @model_validator(mode="before")
+    @classmethod
+    def drop_removed_fields(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        migrated = dict(cast(dict[str, object], value))
+        for removed in (
+            "priority",
+            "load_factor",
+            "concurrency",
+            "schedule_multiplier",
+            "boost_until",
+            "boost_load_delta",
+        ):
+            migrated.pop(removed, None)
+        return migrated

@@ -92,16 +92,10 @@ class GuardianAPI:
             Route("/api/guardian/v1/probe-spend", self.probe_spend, methods=["GET"]),
             Route("/api/guardian/v1/probe-budget", self.probe_budget, methods=["GET"]),
             Route("/api/guardian/v1/sampling/status", self.sampling_status, methods=["GET"]),
-            Route("/api/guardian/v1/write-ownership", self.write_ownership, methods=["GET"]),
             Route(
                 "/api/guardian/v1/channels/{channel_id:str}/explanation",
                 self.channel_explanation,
                 methods=["GET"],
-            ),
-            Route(
-                "/api/guardian/v1/channels/{channel_id:str}/ownership",
-                self.channel_ownership,
-                methods=["POST"],
             ),
             Route("/api/guardian/v1/rollout/advance", self.advance_rollout, methods=["POST"]),
             Route("/api/guardian/v1/rollout/stop", self.stop_writeback, methods=["POST"]),
@@ -326,14 +320,10 @@ class GuardianAPI:
             name = body.get("action")
             if not isinstance(name, str):
                 raise ServiceError("VALIDATION_ERROR", "action must be a string")
-            minutes = body.get("minutes")
-            if minutes is not None and (isinstance(minutes, bool) or not isinstance(minutes, int)):
-                raise ServiceError("VALIDATION_ERROR", "minutes must be an integer")
             return await self.service.channel_action(
                 channel_id,
                 name,
                 idempotency_key=self._idempotency_key(request, required=False),
-                minutes=minutes,
             )
 
         return await self._execute(
@@ -356,43 +346,12 @@ class GuardianAPI:
     async def sampling_status(self, request: Request) -> Response:
         return await self._execute(request, "sub2api:read", self.service.sampling_status)
 
-    async def write_ownership(self, request: Request) -> Response:
-        return await self._execute(request, "sub2api:read", self.service.write_ownership)
-
     async def channel_explanation(self, request: Request) -> Response:
         channel_id = request.path_params["channel_id"][:128]
         return await self._execute(
             request,
             "sub2api:read",
             lambda: self.service.channel_explanation(channel_id),
-        )
-
-    async def channel_ownership(self, request: Request) -> Response:
-        channel_id = request.path_params["channel_id"][:128]
-
-        async def change() -> dict[str, Any]:
-            body = await self._body(request)
-            field_name = body.get("field_name")
-            owner = body.get("owner")
-            if not isinstance(field_name, str) or not isinstance(owner, str):
-                raise ServiceError(
-                    "VALIDATION_ERROR",
-                    "field_name and owner must be strings",
-                )
-            return await self.service.set_field_ownership(
-                channel_id=channel_id,
-                field_name=field_name,
-                owner=owner,
-                expected_revision=self._revision(request),
-            )
-
-        return await self._execute(
-            request,
-            "sub2api:admin",
-            change,
-            mutation="guardian_set_field_ownership",
-            subject=channel_id,
-            require_idempotency=True,
         )
 
     async def advance_rollout(self, request: Request) -> Response:

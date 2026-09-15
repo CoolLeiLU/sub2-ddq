@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Removed
+
+- Guardian no longer writes `priority`, `load_factor`, or `schedulable` account fields. The
+  per-account weight allocation, bounded priority recommendation, verified field writeback,
+  write audits, and field-ownership subsystems were removed along with their policy knobs,
+  channel overrides (priority/load_factor/concurrency/schedule_multiplier/boost), REST
+  endpoints, MCP tools, Prometheus metrics, and UI controls. Health evaluation, circuit
+  breaking, and evidence-gated account recovery are unchanged. The `guardian_write_audits`
+  and `guardian_field_ownership` tables are dropped by schema migration 10.
+
 ### Added
 
 - Guardian now has strict, backward-compatible contracts for shared sampling, evidence

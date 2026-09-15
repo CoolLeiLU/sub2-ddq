@@ -484,7 +484,6 @@ class Sub2APIMCPServer:
             channel_id: str,
             action: str,
             idempotency_key: str | None = None,
-            minutes: int | None = None,
         ) -> str:
             return await self._execute(
                 "guardian_channel_action",
@@ -493,7 +492,6 @@ class Sub2APIMCPServer:
                     channel_id,
                     action,
                     idempotency_key=idempotency_key,
-                    minutes=minutes,
                 ),
                 mutation=True,
                 subject=channel_id,
@@ -540,14 +538,6 @@ class Sub2APIMCPServer:
                 "sub2api:read",
                 lambda: self._guardian().channel_explanation(channel_id),
                 subject=channel_id,
-            )
-
-        @mcp.tool(description="List Guardian field baselines and current ownership.")
-        async def guardian_get_write_ownership() -> str:
-            return await self._execute(
-                "guardian_get_write_ownership",
-                "sub2api:read",
-                self._guardian().write_ownership,
             )
 
         @mcp.tool(description="Get recovery-probe requests, Token budget, and blocked count.")

@@ -34,7 +34,7 @@ from .delivery import DeliveryService, OutboxWorker
 from .errors import ServiceError
 from .guardian.account_recovery import AccountRecoveryOperations
 from .guardian.api import GuardianAPI
-from .guardian.engine import GuardianEngine, GuardianSchedulingOperations
+from .guardian.engine import GuardianEngine
 from .guardian.repository import GuardianRepository
 from .guardian.service import GuardianService
 from .jobs import JobManager, VideoJobService
@@ -148,7 +148,6 @@ def build_runtime(
         GuardianEngine(
             guardian_repository,
             operations,
-            scheduling_operations=cast(GuardianSchedulingOperations, operations),
         ),
         metrics,
         repository,
