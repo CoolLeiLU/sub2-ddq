@@ -16,7 +16,12 @@ from maintenance import (
     MaintenancePolicy,
     MaintenanceServiceFactory,
 )
-from maintenance_gateway import AdminChannelSummary, AdminGroupSummary
+from maintenance_gateway import (
+    AdminChannelSummary,
+    AdminGroupApiKey,
+    AdminGroupSummary,
+    AdminMonitorSummary,
+)
 from monitor import Sub2APIClient
 from notification_image import render_status_report_image
 from probe import ChannelProbe, GroupAccountCounts, ProbeSnapshot, format_status_report
@@ -505,9 +510,6 @@ class LegacySub2APIAdapter:
     async def guardian_list_channels(self) -> list[AdminChannelSummary]:
         return await self._client.list_channels()
 
-    async def guardian_fetch_account_models(self, account_id: str) -> list[str]:
-        return await self._client.fetch_account_models(account_id)
-
     async def guardian_update_channel_model_mapping(
         self,
         channel_id: str,
@@ -527,6 +529,19 @@ class LegacySub2APIAdapter:
             group_ids=group_ids,
             model_mapping=model_mapping,
         )
+
+    async def guardian_list_channel_monitors(self) -> list[AdminMonitorSummary]:
+        return await self._client.list_channel_monitors()
+
+    async def guardian_list_group_api_keys(
+        self, group_id: str
+    ) -> list[AdminGroupApiKey]:
+        return await self._client.list_group_api_keys(group_id)
+
+    async def guardian_fetch_endpoint_models(
+        self, endpoint: str, api_key: str
+    ) -> list[str]:
+        return await self._client.fetch_endpoint_models(endpoint, api_key)
 
     async def guardian_rebind_channel(
         self,

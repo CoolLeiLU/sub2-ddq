@@ -64,6 +64,7 @@ class MaintenanceApiAdapterConfig:
     request_logs_url: str
     channels_url: str = ""
     groups_url: str = ""
+    monitors_url: str = ""
     timezone_name: str = "Asia/Shanghai"
     account_snapshot_page_size: int = 100
     max_account_pages: int = 100
@@ -296,12 +297,26 @@ class AdminChannelSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class AdminMonitorSummary:
+    monitor_id: str
+    name: str
+    enabled: bool
+    endpoint: str
+    api_key_masked: str
+
+
+@dataclass(frozen=True, slots=True)
+class AdminGroupApiKey:
+    key: str
+    status: str
+
+
+@dataclass(frozen=True, slots=True)
 class AdminGroupSummary:
     group_id: str
     name: str
     platform: str
     status: str
-    configured_models: tuple[str, ...] = ()
 
 
 class MaintenanceApiAdapter:
@@ -578,31 +593,6 @@ class MaintenanceApiAdapter:
     async def list_channels(self) -> list[AdminChannelSummary]:
         return await asyncio.to_thread(self.list_channels_sync)
 
-    def fetch_account_models_sync(self, account_id: str) -> list[str]:
-        normalized_id = _positive_id_text(account_id, "account id")
-        payload = self._request_port._request_json(
-            f"{self._config.accounts_url}/{normalized_id}/models"
-        )
-        if not isinstance(payload, dict) or payload.get("code") != 0:
-            raise MonitorDataError("account models request failed")
-        data = payload.get("data")
-        if not isinstance(data, list):
-            raise MonitorDataError("account models data is invalid")
-        models: set[str] = set()
-        for item in data:
-            if isinstance(item, str):
-                model_id = item.strip()
-            elif isinstance(item, dict):
-                model_id = str(item.get("id") or "").strip()
-            else:
-                raise MonitorDataError("account model entry is invalid")
-            if model_id:
-                models.add(model_id)
-        return sorted(models)
-
-    async def fetch_account_models(self, account_id: str) -> list[str]:
-        return await asyncio.to_thread(self.fetch_account_models_sync, account_id)
-
     def update_channel_model_mapping_sync(
         self,
         channel_id: str,
@@ -728,42 +718,117 @@ class MaintenanceApiAdapter:
                 or not status.strip()
             ):
                 raise MonitorDataError("group record is invalid")
-            configured: set[str] = set()
-            allowlist = item.get("model_allowlist")
-            if allowlist is not None:
-                if not isinstance(allowlist, dict):
-                    raise MonitorDataError("group model allowlist is invalid")
-                raw_models = allowlist.get("models") or []
-                if not isinstance(raw_models, list):
-                    raise MonitorDataError("group model allowlist is invalid")
-                for model in raw_models:
-                    if isinstance(model, str) and model.strip():
-                        configured.add(model.strip())
-            pricing = item.get("model_pricing") or []
-            if not isinstance(pricing, list):
-                raise MonitorDataError("group model pricing is invalid")
-            for entry in pricing:
-                if not isinstance(entry, dict):
-                    raise MonitorDataError("group model pricing is invalid")
-                raw_models = entry.get("models") or []
-                if not isinstance(raw_models, list):
-                    raise MonitorDataError("group model pricing is invalid")
-                for model in raw_models:
-                    if isinstance(model, str) and model.strip():
-                        configured.add(model.strip())
             groups.append(
                 AdminGroupSummary(
                     group_id=_positive_id_text(item.get("id"), "group id"),
                     name=name.strip(),
                     platform=platform.strip(),
                     status=status.strip(),
-                    configured_models=tuple(sorted(configured)),
                 )
             )
         return groups
 
     async def list_groups(self) -> list[AdminGroupSummary]:
         return await asyncio.to_thread(self.list_groups_sync)
+
+    def list_channel_monitors_sync(self) -> list[AdminMonitorSummary]:
+        if not self._config.monitors_url:
+            raise MonitorDataError("channel monitors endpoint is not configured")
+        payload = self._request_port._request_json(
+            f"{self._config.monitors_url}?page=1&page_size=100"
+        )
+        if not isinstance(payload, dict) or payload.get("code") != 0:
+            raise MonitorDataError("channel monitor list request failed")
+        data = payload.get("data")
+        items = data.get("items") if isinstance(data, dict) else data
+        if not isinstance(items, list):
+            raise MonitorDataError("channel monitor list is invalid")
+        monitors: list[AdminMonitorSummary] = []
+        for item in items:
+            if not isinstance(item, dict):
+                raise MonitorDataError("channel monitor entry is invalid")
+            name = item.get("name")
+            endpoint = item.get("endpoint")
+            masked = item.get("api_key_masked")
+            if (
+                not isinstance(name, str)
+                or not isinstance(endpoint, str)
+                or not isinstance(masked, str)
+            ):
+                raise MonitorDataError("channel monitor fields are invalid")
+            monitors.append(
+                AdminMonitorSummary(
+                    monitor_id=_positive_id_text(item.get("id"), "monitor id"),
+                    name=name.strip(),
+                    enabled=item.get("enabled") is True,
+                    endpoint=endpoint.strip(),
+                    api_key_masked=masked.strip(),
+                )
+            )
+        return monitors
+
+    async def list_channel_monitors(self) -> list[AdminMonitorSummary]:
+        return await asyncio.to_thread(self.list_channel_monitors_sync)
+
+    def list_group_api_keys_sync(self, group_id: str) -> list[AdminGroupApiKey]:
+        normalized_id = _positive_id_text(group_id, "group id")
+        if not self._config.channels_url:
+            raise MonitorDataError("channels endpoint is not configured")
+        admin_base = self._config.channels_url.rsplit("/channels", 1)[0]
+        keys: list[AdminGroupApiKey] = []
+        for page in range(1, 21):
+            payload = self._request_port._request_json(
+                f"{admin_base}/groups/{normalized_id}/api-keys"
+                f"?page={page}&page_size=100"
+            )
+            if not isinstance(payload, dict) or payload.get("code") != 0:
+                raise MonitorDataError("group api key list request failed")
+            data = payload.get("data")
+            items = data.get("items") if isinstance(data, dict) else None
+            if not isinstance(items, list):
+                raise MonitorDataError("group api key list is invalid")
+            for item in items:
+                if not isinstance(item, dict):
+                    raise MonitorDataError("group api key entry is invalid")
+                key = item.get("key")
+                status = item.get("status")
+                if not isinstance(key, str) or not isinstance(status, str):
+                    raise MonitorDataError("group api key fields are invalid")
+                keys.append(AdminGroupApiKey(key=key.strip(), status=status.strip()))
+            pages = data.get("pages") if isinstance(data, dict) else None
+            if not isinstance(pages, int) or page >= pages:
+                break
+        return keys
+
+    async def list_group_api_keys(self, group_id: str) -> list[AdminGroupApiKey]:
+        return await asyncio.to_thread(self.list_group_api_keys_sync, group_id)
+
+    def fetch_endpoint_models_sync(self, endpoint: str, api_key: str) -> list[str]:
+        base = endpoint.rstrip("/")
+        if not base or not api_key.strip():
+            raise MonitorDataError("endpoint model list request is invalid")
+        payload = self._request_port._request_json(
+            f"{base}/v1/models",
+            extra_headers={"x-api-key": api_key.strip()},
+        )
+        if not isinstance(payload, dict):
+            raise MonitorDataError("endpoint model list is invalid")
+        data = payload.get("data")
+        if not isinstance(data, list):
+            raise MonitorDataError("endpoint model list is invalid")
+        models: set[str] = set()
+        for item in data:
+            if not isinstance(item, dict):
+                raise MonitorDataError("endpoint model entry is invalid")
+            model_id = item.get("id")
+            if isinstance(model_id, str) and model_id.strip():
+                models.add(model_id.strip())
+        return sorted(models)
+
+    async def fetch_endpoint_models(self, endpoint: str, api_key: str) -> list[str]:
+        return await asyncio.to_thread(
+            self.fetch_endpoint_models_sync, endpoint, api_key
+        )
 
     def fetch_account_dispatch_state_sync(
         self,

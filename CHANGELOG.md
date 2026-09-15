@@ -6,12 +6,13 @@
 
 - Scheduled model-plaza refresh: twice daily at the configured
   `model_plaza.refresh_times` (default 00:00 and 12:00 Asia/Shanghai)
-  Guardian probes the upstream model catalog of every usable account in
-  each monitored group via `GET /admin/accounts/{id}/models` and rewrites
-  the bound Sub2API channel's `model_mapping`, so the model plaza only
-  lists models that are both configured on the group
-  (`model_allowlist`/`model_pricing`) and currently servable by a usable
-  account.  Refreshes are
+  Guardian resolves each monitored group's live model catalog the same
+  way the gateway does: every enabled channel monitor's masked API key is
+  matched to its plaintext via `GET /admin/groups/{id}/api-keys`, then
+  `GET {endpoint}/v1/models` returns exactly what that key (and its
+  group) can serve.  The result rewrites the bound Sub2API channel's
+  `model_mapping`, so the model plaza mirrors the platform's real
+  offer.  Refreshes are
   recorded as `MODEL_PLAZA_REFRESHED` events, only channels with a single
   model-mapping platform are rewritten, and a mapping is never emptied
   when every catalog fetch for a group failed.  Monitored groups that are

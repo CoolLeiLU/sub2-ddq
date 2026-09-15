@@ -20,7 +20,9 @@ from client_errors import MonitorRequestError
 from maintenance import MaintenancePolicy
 from maintenance_gateway import (
     AdminChannelSummary,
+    AdminGroupApiKey,
     AdminGroupSummary,
+    AdminMonitorSummary,
     MaintenanceApiAdapterConfig,
     MaintenanceApiAdapterFactory,
 )
@@ -426,6 +428,7 @@ class Sub2APIClient:
                 accounts_url=self.ADMIN_ACCOUNTS_URL,
                 channels_url=self.ADMIN_CHANNELS_URL,
                 groups_url=self.ADMIN_GROUPS_URL,
+                monitors_url=self.API_URL,
                 usage_url=self.ADMIN_USAGE_URL,
                 request_logs_url=self.ADMIN_OPS_REQUESTS_URL,
                 timezone_name=self.USAGE_TIMEZONE,
@@ -716,12 +719,6 @@ class Sub2APIClient:
     async def list_channels(self) -> list[AdminChannelSummary]:
         return await self._maintenance_adapter.list_channels()
 
-    def fetch_account_models_sync(self, account_id: str) -> list[str]:
-        return self._maintenance_adapter.fetch_account_models_sync(account_id)
-
-    async def fetch_account_models(self, account_id: str) -> list[str]:
-        return await self._maintenance_adapter.fetch_account_models(account_id)
-
     def update_channel_model_mapping_sync(
         self,
         channel_id: str,
@@ -740,6 +737,28 @@ class Sub2APIClient:
         return await self._maintenance_adapter.update_channel_model_mapping(
             channel_id,
             model_mapping,
+        )
+
+    def list_channel_monitors_sync(self) -> list[AdminMonitorSummary]:
+        return self._maintenance_adapter.list_channel_monitors_sync()
+
+    async def list_channel_monitors(self) -> list[AdminMonitorSummary]:
+        return await self._maintenance_adapter.list_channel_monitors()
+
+    def list_group_api_keys_sync(self, group_id: str) -> list[AdminGroupApiKey]:
+        return self._maintenance_adapter.list_group_api_keys_sync(group_id)
+
+    async def list_group_api_keys(self, group_id: str) -> list[AdminGroupApiKey]:
+        return await self._maintenance_adapter.list_group_api_keys(group_id)
+
+    def fetch_endpoint_models_sync(self, endpoint: str, api_key: str) -> list[str]:
+        return self._maintenance_adapter.fetch_endpoint_models_sync(
+            endpoint, api_key
+        )
+
+    async def fetch_endpoint_models(self, endpoint: str, api_key: str) -> list[str]:
+        return await self._maintenance_adapter.fetch_endpoint_models(
+            endpoint, api_key
         )
 
     def rebind_channel_sync(
