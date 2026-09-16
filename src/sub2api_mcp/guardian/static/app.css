@@ -974,6 +974,20 @@ main {
   font-size: 0.75rem;
 }
 
+.recovery-toggle {
+  align-self: flex-start;
+}
+
+.recovery-detail {
+  width: 100%;
+  margin-top: var(--space-sm);
+  overflow-x: auto;
+}
+
+.recovery-detail table {
+  font-size: 0.75rem;
+}
+
 .event-item:last-child {
   border-bottom: 0;
 }

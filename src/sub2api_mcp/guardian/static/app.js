@@ -122,6 +122,57 @@ const channelActionLabels = {
   include: "纳入",
 };
 
+const recoveryResultLabels = {
+  ENABLED: "已启用",
+  DISABLED: "已禁用",
+  INDETERMINATE: "不确定",
+  SKIPPED: "已跳过",
+};
+
+const recoveryClassificationLabels = {
+  AVAILABLE: "可恢复",
+  MANUAL_PAUSE: "人工暂停",
+  UPSTREAM_ERROR: "上游错误",
+  DISABLED: "已禁用",
+  SYSTEM_QUARANTINE: "系统隔离",
+  EXCLUDED: "已排除",
+};
+
+const recoveryReasonLabels = {
+  account_test_failed: "探测调用失败",
+  test_identity_mismatch: "探测返回账号不一致",
+  account_mutation_failed: "账号变更执行失败",
+  mutation_identity_mismatch: "变更回读账号不一致",
+  run_stopped_after_unverified_mutation: "存在未验证变更，本轮已停止",
+  test_incomplete: "探测未完成（上游未给出结论）",
+  healthy_no_change: "健康，无需变更",
+  manual_pause: "人工暂停",
+  expired: "账号已过期",
+  temporary_unavailable: "临时不可用",
+  account_state_unavailable: "账号状态不可用",
+  already_enabled: "已处于启用状态",
+  already_disabled: "已处于禁用状态",
+  automatic_pause_preserved: "保留自动暂停",
+  test_context_invalid: "探测上下文无效",
+  invalid_test_result: "探测结果无效",
+  invalid_disable_result: "禁用回读无效",
+  slow_first_token: "首字延迟过慢",
+  channel_test_failed: "渠道探测失败",
+};
+
+function recoveryReasonText(reason) {
+  if (!reason) return "—";
+  const raw = String(reason);
+  if (raw.startsWith("shared_unmonitored_scope_test_")) {
+    const testResult = raw.slice("shared_unmonitored_scope_test_".length);
+    return `共享范围外不可写回（探测结果 ${testResult}）`;
+  }
+  return raw
+    .split(":")
+    .map((part) => recoveryReasonLabels[part] || part)
+    .join(" → ");
+}
+
 const policyFields = [
   ["#p-scan", "scan_interval_seconds", "number"],
   ["#p-sampling-mode", "sampling.mode", "string"],
@@ -448,7 +499,7 @@ async function loadRecovery() {
     runList.append(make("p", "empty", "暂无恢复任务"));
   } else {
     runs.forEach((item) => {
-      const row = make("article", "recovery-item");
+      const row = make("article", "recovery-item expandable");
       const result = item.result || {};
       const title = make(
         "strong",
@@ -458,12 +509,77 @@ async function loadRecovery() {
       const meta = make(
         "span",
         "muted",
-        `测试 ${result.tested || 0} · 启用 ${result.enabled || 0} · 禁用 ${result.disabled || 0} · 不确定 ${result.indeterminate || 0} · ${formatDate(item.started_at || item.created_at)}`,
+        `测试 ${result.tested || 0} · 启用 ${result.enabled || 0} · 禁用 ${result.disabled || 0} · 不确定 ${result.indeterminate || 0} · 跳过 ${result.skipped || 0} · ${formatDate(item.started_at || item.created_at)}`,
       );
-      row.append(title, meta);
+      const toggle = make("button", "text-button recovery-toggle", "查看账号明细 ▾");
+      toggle.type = "button";
+      const detail = make("div", "recovery-detail");
+      detail.hidden = true;
+      toggle.addEventListener("click", () => {
+        toggleRecoveryDetail(toggle, detail, item.run_id).catch((error) =>
+          toast(error.message, true),
+        );
+      });
+      row.append(title, meta, toggle, detail);
       runList.append(row);
     });
   }
+}
+
+async function toggleRecoveryDetail(toggle, detail, runId) {
+  if (!detail.hidden) {
+    detail.hidden = true;
+    toggle.textContent = "查看账号明细 ▾";
+    return;
+  }
+  if (!detail.dataset.loaded) {
+    toggle.disabled = true;
+    toggle.textContent = "加载中…";
+    try {
+      const data = await api(`/recovery/runs/${encodeURIComponent(runId)}`);
+      renderRecoveryDetail(detail, data.results || []);
+      detail.dataset.loaded = "1";
+    } finally {
+      toggle.disabled = false;
+    }
+  }
+  detail.hidden = false;
+  toggle.textContent = "收起明细 ▴";
+}
+
+function renderRecoveryDetail(root, results) {
+  root.replaceChildren();
+  if (!results.length) {
+    root.append(make("p", "empty", "该任务没有账号级记录"));
+    return;
+  }
+  const scroll = make("div", "table-scroll");
+  const table = make("table");
+  const thead = make("thead");
+  const headRow = make("tr");
+  for (const label of ["账号", "分类", "结果", "原因", "已探测", "时间"]) {
+    headRow.append(make("th", "", label));
+  }
+  thead.append(headRow);
+  const body = make("tbody");
+  for (const item of results) {
+    const row = make("tr");
+    cell(row, `账号 ${item.account_id}`);
+    cell(row, recoveryClassificationLabels[item.classification] || item.classification || "—");
+    const resultBadge = make(
+      "span",
+      `badge ${item.result === "ENABLED" ? "success" : item.result === "DISABLED" ? "danger" : item.result === "INDETERMINATE" ? "warning" : "neutral"}`,
+      recoveryResultLabels[item.result] || item.result || "—",
+    );
+    cell(row, resultBadge);
+    cell(row, recoveryReasonText(item.reason));
+    cell(row, item.tested ? "是" : "否");
+    cell(row, formatDateTime(item.occurred_at));
+    body.append(row);
+  }
+  table.append(thead, body);
+  scroll.append(table);
+  root.append(scroll);
 }
 
 async function setScheduling(enabled) {

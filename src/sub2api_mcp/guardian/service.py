@@ -271,6 +271,19 @@ class GuardianService:
             "recent_runs": [item.model_dump(mode="json") for item in runs],
         }
 
+    async def recovery_run(self, run_id: str) -> dict[str, Any]:
+        run = await self.repository.get_account_recovery_run(run_id)
+        if run is None:
+            raise ServiceError(
+                "ACCOUNT_RECOVERY_RUN_NOT_FOUND",
+                "The account recovery run does not exist",
+            )
+        results = await self.repository.list_account_recovery_results(run_id)
+        return {
+            "run": run.model_dump(mode="json"),
+            "results": [item.model_dump(mode="json") for item in results],
+        }
+
     async def submit_pending_recovery(
         self,
         *,

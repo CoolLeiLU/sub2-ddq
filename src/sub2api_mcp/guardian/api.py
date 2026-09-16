@@ -63,6 +63,11 @@ class GuardianAPI:
                 self.submit_recovery,
                 methods=["POST"],
             ),
+            Route(
+                "/api/guardian/v1/recovery/runs/{run_id:str}",
+                self.recovery_run,
+                methods=["GET"],
+            ),
             Route("/api/guardian/v1/policy", self.policy, methods=["GET", "PATCH"]),
             Route("/api/guardian/v1/runs", self.runs, methods=["POST"]),
             Route(
@@ -154,6 +159,14 @@ class GuardianAPI:
             request,
             "sub2api:read",
             lambda: self.service.recovery_status(limit=self._limit(request, default=20)),
+        )
+
+    async def recovery_run(self, request: Request) -> Response:
+        run_id = str(request.path_params["run_id"])
+        return await self._execute(
+            request,
+            "sub2api:read",
+            lambda: self.service.recovery_run(run_id),
         )
 
     async def submit_recovery(self, request: Request) -> Response:
