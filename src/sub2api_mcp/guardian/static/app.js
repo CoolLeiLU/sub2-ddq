@@ -17,7 +17,7 @@ const pageMeta = {
   events: ["事件日志", "运行、状态迁移和人工操作审计"],
   policy: ["策略配置", "全局规则、系统参数与守护范围"],
   connection: ["连接设置", "上游、API 和存储状态"],
-  info: ["信息与通知", "版本信息和 LangBot 全渠道通知说明"],
+  info: ["信息", "版本信息和守护事件说明"],
 };
 
 const policyFields = [

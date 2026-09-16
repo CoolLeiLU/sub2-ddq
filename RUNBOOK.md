@@ -8,32 +8,24 @@ workers, and the scheduler have started.
 ## First checks
 
 1. Check `/healthz` and container status.
-2. Query `sub2api_get_status` for scheduler state, active jobs, and outbox backlog.
+2. Query `sub2api_get_status` for scheduler state and active jobs.
 3. Inspect JSON logs by `requestId`, `jobId`, or `eventId`.
 4. Inspect `/metrics` with an authorized API key.
 
-## Queue or outbox growth
+## Queue growth
 
 - Video queue: verify the upstream video endpoint is reachable and has not returned an explicit error.
 - Control queue: verify the fixed Sub2API admin endpoints and Admin Key.
-- Outbox: verify the LangBot URL/API key, target bot runtime, and target ID.
-- `outbox_backlog` counts only pending, leased, and scheduled retry work.
-  `outbox_terminal_failures` counts stopped non-retryable `DISCARDED` deliveries retained for
-  audit; older service versions ignore this state if an automatic deployment rollback occurs.
-- Retryable LangBot failures back off from 30 seconds to a maximum of 15 minutes. Coalesced
-  status and Guardian recovery events keep only the latest pending item for each target.
-- Unsupported media: set the target media policy to `AUTO`, `TEXT_ONLY`, or `LINK`.
 
 ## Database retention
 
 - Retention runs every 10 minutes in batches of at most 20,000 rows per repository, including
   while Guardian direct scheduling is stopped.
 - Account observations are retained for 2 days; Guardian runs and idempotency results for 7 days;
-  terminal jobs, successful or terminal-failed delivery history, and traffic buckets for 30
-  days; health samples,
+  terminal jobs and traffic buckets for 30 days; health samples,
   events, probes, closed recovery episodes, input snapshots, and completed recovery runs for
   90 days; audits for 365 days.
-- Open channel-error episodes, running recovery/evaluation jobs, retryable deliveries, active
+- Open channel-error episodes, running recovery/evaluation jobs, active
   jobs, field ownership, policy, current channels, and account quarantine state are never removed
   by retention.
 - Check `sub2api_retention_runs_total`, `sub2api_retention_rows_total`, and
@@ -56,8 +48,9 @@ workers, and the scheduler have started.
   automatically.
 - Query `guardian_get_recovery_status` and inspect `active_check.enabled`,
   `active_check.interval_seconds`, and `active_check.last_run_at` when verifying the schedule.
-- Healthy hourly checks do not generate administrator messages. Definitive failures,
-  indeterminate results, and verified state changes still use the recovery notification path.
+- Healthy hourly checks do not generate Guardian events. Definitive failures,
+  indeterminate results, and verified state changes are recorded in the local Guardian event
+  and run history.
 
 ## Slow-first-token protection
 
@@ -81,6 +74,6 @@ workers, and the scheduler have started.
 
 ## Security incident
 
-- Rotate the MCP, Sub2API, LangBot, and actor-bridge secrets independently.
+- Rotate the MCP, Sub2API, and actor-bridge secrets independently.
 - Search audit events for recent mutations; tokens themselves are never stored there.
 - Do not paste raw `.env`, upstream responses, or platform actor IDs into issue reports.

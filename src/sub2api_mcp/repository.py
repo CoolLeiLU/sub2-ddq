@@ -22,18 +22,10 @@ from .contracts import (
     AccountQuarantineReason,
     AccountQuarantineRecord,
     AccountQuarantineRestoreIntent,
-    ClaimedDelivery,
-    DeliveryStatus,
-    DeliveryTargetCreate,
-    DeliveryTargetPage,
-    DeliveryTargetRecord,
     JobPage,
     JobRecord,
     JobStatus,
     JobType,
-    OutboxEventRecord,
-    OutboxEventType,
-    OutboxPayload,
     QuarantineProbeResult,
 )
 from .errors import ServiceError
@@ -97,7 +89,10 @@ class SqliteRepository:
                 self._migrate_quarantine_probe_result(connection)
             if current_version < 7:
                 self._migrate_quarantine_recovery_streak(connection)
-            self._discard_invalid_outbox_failures(connection)
+            if current_version < 8:
+                connection.execute("DROP TABLE IF EXISTS notification_deliveries")
+                connection.execute("DROP TABLE IF EXISTS notification_outbox")
+                connection.execute("DROP TABLE IF EXISTS delivery_targets")
             connection.executescript(ACCOUNT_QUARANTINE_RESTORE_TABLE_SQL)
             connection.execute(
                 "INSERT INTO service_metadata(key, value) VALUES('schema_version', ?) "
@@ -231,22 +226,6 @@ class SqliteRepository:
             if connection.in_transaction:
                 connection.execute("ROLLBACK")
             raise
-
-    @staticmethod
-    def _discard_invalid_outbox_failures(
-        connection: sqlite3.Connection,
-    ) -> None:
-        """Stop legacy poison messages without deleting their audit evidence."""
-        connection.execute(
-            "UPDATE notification_deliveries SET status = ?, next_attempt_at = NULL, "
-            "lease_owner = NULL, lease_expires_at = NULL "
-            "WHERE status = ? AND last_error_code = ?",
-            (
-                DeliveryStatus.DISCARDED.value,
-                DeliveryStatus.FAILED.value,
-                "OUTBOX_PAYLOAD_INVALID",
-            ),
-        )
 
     async def create_job(self, job_type: JobType, payload: dict[str, Any]) -> JobRecord:
         return await asyncio.to_thread(self._create_job_sync, job_type, payload)
@@ -566,131 +545,6 @@ class SqliteRepository:
             raise
         finally:
             connection.close()
-
-    async def upsert_delivery_target(
-        self, target: DeliveryTargetCreate
-    ) -> DeliveryTargetRecord:
-        return await asyncio.to_thread(self._upsert_delivery_target_sync, target)
-
-    def _upsert_delivery_target_sync(
-        self, target: DeliveryTargetCreate
-    ) -> DeliveryTargetRecord:
-        now = _iso(self._clock())
-        with self._connect() as connection:
-            existing = connection.execute(
-                "SELECT delivery_target_id, created_at FROM delivery_targets WHERE name = ?",
-                (target.name,),
-            ).fetchone()
-            delivery_target_id = (
-                existing["delivery_target_id"] if existing is not None else str(uuid.uuid4())
-            )
-            created_at = existing["created_at"] if existing is not None else now
-            connection.execute(
-                "INSERT INTO delivery_targets(delivery_target_id, name, bot_uuid, target_type, "
-                "target_id, purposes_json, media_policy, required, enabled, created_at, "
-                "updated_at) "
-                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(name) DO UPDATE SET bot_uuid = excluded.bot_uuid, "
-                "target_type = excluded.target_type, target_id = excluded.target_id, "
-                "purposes_json = excluded.purposes_json, media_policy = excluded.media_policy, "
-                "required = excluded.required, enabled = excluded.enabled, "
-                "updated_at = excluded.updated_at",
-                (
-                    delivery_target_id,
-                    target.name,
-                    target.bot_uuid,
-                    target.target_type.value,
-                    target.target_id,
-                    _json(sorted(item.value for item in target.purposes)),
-                    target.media_policy.value,
-                    int(target.required),
-                    int(target.enabled),
-                    created_at,
-                    now,
-                ),
-            )
-            row = connection.execute(
-                "SELECT * FROM delivery_targets WHERE name = ?", (target.name,)
-            ).fetchone()
-        assert row is not None
-        return self._target_from_row(row)
-
-    async def list_delivery_targets(self) -> list[DeliveryTargetRecord]:
-        return await asyncio.to_thread(self._list_delivery_targets_sync)
-
-    def _list_delivery_targets_sync(self) -> list[DeliveryTargetRecord]:
-        with self._connect() as connection:
-            rows = connection.execute(
-                "SELECT * FROM delivery_targets ORDER BY name, delivery_target_id"
-            ).fetchall()
-        return [self._target_from_row(row) for row in rows]
-
-    async def list_delivery_targets_page(
-        self, *, limit: int = 20, cursor: str | None = None
-    ) -> DeliveryTargetPage:
-        return await asyncio.to_thread(
-            self._list_delivery_targets_page_sync, limit, cursor
-        )
-
-    def _list_delivery_targets_page_sync(
-        self, limit: int, cursor: str | None
-    ) -> DeliveryTargetPage:
-        if not 1 <= limit <= 100:
-            raise ServiceError(
-                "INVALID_PAGE_SIZE", "Delivery target page size must be between 1 and 100"
-            )
-        parameters: list[object] = []
-        where = ""
-        if cursor:
-            name, delivery_target_id = self._decode_cursor(cursor)
-            where = "WHERE name > ? OR (name = ? AND delivery_target_id > ?)"
-            parameters.extend((name, name, delivery_target_id))
-        parameters.append(limit + 1)
-        with self._connect() as connection:
-            rows = connection.execute(
-                f"SELECT * FROM delivery_targets {where} "
-                "ORDER BY name, delivery_target_id LIMIT ?",
-                parameters,
-            ).fetchall()
-        has_more = len(rows) > limit
-        selected = rows[:limit]
-        next_cursor = None
-        if has_more and selected:
-            next_cursor = self._encode_cursor(
-                selected[-1]["name"], selected[-1]["delivery_target_id"]
-            )
-        return DeliveryTargetPage(
-            items=[self._target_from_row(row) for row in selected],
-            next_cursor=next_cursor,
-        )
-
-    async def get_delivery_target(
-        self, delivery_target_id: str
-    ) -> DeliveryTargetRecord | None:
-        return await asyncio.to_thread(
-            self._get_delivery_target_sync, delivery_target_id
-        )
-
-    def _get_delivery_target_sync(
-        self, delivery_target_id: str
-    ) -> DeliveryTargetRecord | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM delivery_targets WHERE delivery_target_id = ?",
-                (delivery_target_id,),
-            ).fetchone()
-        return self._target_from_row(row) if row is not None else None
-
-    async def delete_delivery_target(self, delivery_target_id: str) -> None:
-        await asyncio.to_thread(self._delete_delivery_target_sync, delivery_target_id)
-
-    def _delete_delivery_target_sync(self, delivery_target_id: str) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                "UPDATE delivery_targets SET enabled = 0, updated_at = ? "
-                "WHERE delivery_target_id = ?",
-                (_iso(self._clock()), delivery_target_id),
-            )
 
     async def upsert_account_quarantine(
         self,
@@ -1468,343 +1322,6 @@ class SqliteRepository:
         finally:
             connection.close()
 
-    async def enqueue_outbox(
-        self,
-        event_type: OutboxEventType,
-        payload: dict[str, Any],
-        target_ids: list[str],
-    ) -> OutboxEventRecord:
-        return await asyncio.to_thread(
-            self._enqueue_outbox_sync, event_type, payload, target_ids
-        )
-
-    def _enqueue_outbox_sync(
-        self,
-        event_type: OutboxEventType,
-        payload: dict[str, Any],
-        target_ids: list[str],
-    ) -> OutboxEventRecord:
-        if not target_ids:
-            raise ServiceError("NO_DELIVERY_TARGET", "At least one delivery target is required")
-        try:
-            validated_payload = OutboxPayload.model_validate(payload)
-        except ValidationError as exc:
-            raise ServiceError(
-                "OUTBOX_PAYLOAD_INVALID",
-                "The notification payload is invalid",
-                retryable=False,
-            ) from exc
-        canonical_payload = validated_payload.model_dump(
-            mode="json",
-            by_alias=True,
-            exclude_none=True,
-        )
-        unique_target_ids = list(dict.fromkeys(target_ids))
-        event_id = str(uuid.uuid4())
-        now = _iso(self._clock())
-        raw_dedup_key = canonical_payload.get("dedupKey")
-        dedup_key = (
-            raw_dedup_key
-            if event_type is OutboxEventType.RECOVERY_RESULT
-            and isinstance(raw_dedup_key, str)
-            and 1 <= len(raw_dedup_key) <= 128
-            else None
-        )
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            for target_id in unique_target_ids:
-                exists = connection.execute(
-                    "SELECT 1 FROM delivery_targets "
-                    "WHERE delivery_target_id = ? AND enabled = 1",
-                    (target_id,),
-                ).fetchone()
-                if exists is None:
-                    raise ServiceError(
-                        "DELIVERY_TARGET_NOT_FOUND",
-                        "A delivery target does not exist or is disabled",
-                    )
-            if dedup_key is not None:
-                existing = connection.execute(
-                    "SELECT event_id, payload_json, created_at FROM notification_outbox "
-                    "WHERE event_type = ? "
-                    "AND json_extract(payload_json, '$.dedupKey') = ? LIMIT 1",
-                    (event_type.value, dedup_key),
-                ).fetchone()
-                if existing is not None:
-                    stored_payload = json.loads(existing["payload_json"])
-                    stored_created_at = _datetime(existing["created_at"])
-                    if not isinstance(stored_payload, dict) or stored_created_at is None:
-                        raise RuntimeError("persisted outbox event is invalid")
-                    connection.execute("COMMIT")
-                    return OutboxEventRecord(
-                        event_id=existing["event_id"],
-                        event_type=event_type,
-                        payload=cast(dict[str, Any], stored_payload),
-                        created_at=stored_created_at,
-                    )
-            raw_coalesce_key = canonical_payload.get("coalesceKey")
-            coalesce_key = (
-                raw_coalesce_key
-                if isinstance(raw_coalesce_key, str)
-                and 1 <= len(raw_coalesce_key) <= 128
-                else None
-            )
-            if event_type is OutboxEventType.STATUS_CHANGED or coalesce_key is not None:
-                placeholders = ",".join("?" for _ in unique_target_ids)
-                key_filter = (
-                    " AND json_extract(payload_json, '$.coalesceKey') = ?"
-                    if coalesce_key is not None
-                    else " AND json_extract(payload_json, '$.coalesceKey') IS NULL"
-                )
-                connection.execute(
-                    "DELETE FROM notification_deliveries "
-                    "WHERE event_id IN ("
-                    "SELECT event_id FROM notification_outbox WHERE event_type = ?"
-                    f"{key_filter}"
-                    ") "
-                    f"AND delivery_target_id IN ({placeholders}) "
-                    "AND status IN (?, ?)",
-                    (
-                        event_type.value,
-                        *((coalesce_key,) if coalesce_key is not None else ()),
-                        *unique_target_ids,
-                        DeliveryStatus.PENDING.value,
-                        DeliveryStatus.FAILED.value,
-                    ),
-                )
-                connection.execute(
-                    "DELETE FROM notification_outbox "
-                    "WHERE event_type = ? AND NOT EXISTS ("
-                    "SELECT 1 FROM notification_deliveries "
-                    "WHERE notification_deliveries.event_id = notification_outbox.event_id"
-                    ")",
-                    (event_type.value,),
-                )
-            connection.execute(
-                "INSERT INTO notification_outbox(event_id, event_type, payload_json, created_at) "
-                "VALUES(?, ?, ?, ?)",
-                (event_id, event_type.value, _json(canonical_payload), now),
-            )
-            for target_id in unique_target_ids:
-                connection.execute(
-                    "INSERT INTO notification_deliveries(delivery_id, event_id, "
-                    "delivery_target_id, status) VALUES(?, ?, ?, ?)",
-                    (str(uuid.uuid4()), event_id, target_id, DeliveryStatus.PENDING.value),
-                )
-            connection.execute("COMMIT")
-        except Exception:
-            connection.execute("ROLLBACK")
-            raise
-        finally:
-            connection.close()
-        return OutboxEventRecord(
-            event_id=event_id,
-            event_type=event_type,
-            payload=canonical_payload,
-            created_at=self._clock(),
-        )
-
-    async def claim_next_delivery(
-        self, worker_id: str, *, lease_seconds: int
-    ) -> ClaimedDelivery | None:
-        return await asyncio.to_thread(
-            self._claim_next_delivery_sync, worker_id, lease_seconds
-        )
-
-    def _claim_next_delivery_sync(
-        self, worker_id: str, lease_seconds: int
-    ) -> ClaimedDelivery | None:
-        now_value = self._clock().astimezone(UTC)
-        now = _iso(now_value)
-        lease_expires = _iso(now_value + timedelta(seconds=lease_seconds))
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                "SELECT d.delivery_id FROM notification_deliveries d "
-                "WHERE d.status = ? "
-                "OR (d.status = ? AND d.next_attempt_at IS NOT NULL "
-                "AND d.next_attempt_at <= ?) "
-                "OR (d.status = ? AND d.lease_expires_at <= ?) "
-                "ORDER BY d.rowid LIMIT 1",
-                (
-                    DeliveryStatus.PENDING.value,
-                    DeliveryStatus.FAILED.value,
-                    now,
-                    DeliveryStatus.LEASED.value,
-                    now,
-                ),
-            ).fetchone()
-            if row is None:
-                connection.execute("COMMIT")
-                return None
-            connection.execute(
-                "UPDATE notification_deliveries SET status = ?, attempts = attempts + 1, "
-                "lease_owner = ?, lease_expires_at = ? WHERE delivery_id = ?",
-                (DeliveryStatus.LEASED.value, worker_id, lease_expires, row["delivery_id"]),
-            )
-            claimed = connection.execute(
-                "SELECT d.*, e.event_type, e.payload_json, t.* "
-                "FROM notification_deliveries d "
-                "JOIN notification_outbox e ON e.event_id = d.event_id "
-                "JOIN delivery_targets t ON t.delivery_target_id = d.delivery_target_id "
-                "WHERE d.delivery_id = ?",
-                (row["delivery_id"],),
-            ).fetchone()
-            connection.execute("COMMIT")
-        except Exception:
-            connection.execute("ROLLBACK")
-            raise
-        finally:
-            connection.close()
-        assert claimed is not None
-        return ClaimedDelivery(
-            delivery_id=claimed["delivery_id"],
-            event_id=claimed["event_id"],
-            event_type=OutboxEventType(claimed["event_type"]),
-            payload=json.loads(claimed["payload_json"]),
-            target=self._target_from_row(claimed),
-            attempt=int(claimed["attempts"]),
-        )
-
-    async def mark_delivery_succeeded(self, delivery_id: str) -> None:
-        await asyncio.to_thread(self._mark_delivery_succeeded_sync, delivery_id)
-
-    def _mark_delivery_succeeded_sync(self, delivery_id: str) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                "UPDATE notification_deliveries SET status = ?, delivered_at = ?, "
-                "lease_owner = NULL, lease_expires_at = NULL, next_attempt_at = NULL, "
-                "last_error_code = NULL WHERE delivery_id = ? AND status = ?",
-                (
-                    DeliveryStatus.SUCCEEDED.value,
-                    _iso(self._clock()),
-                    delivery_id,
-                    DeliveryStatus.LEASED.value,
-                ),
-            )
-
-    async def mark_delivery_failed(
-        self, delivery_id: str, error_code: str, *, retry_after_seconds: int
-    ) -> None:
-        await asyncio.to_thread(
-            self._mark_delivery_failed_sync, delivery_id, error_code, retry_after_seconds
-        )
-
-    def _mark_delivery_failed_sync(
-        self, delivery_id: str, error_code: str, retry_after_seconds: int
-    ) -> None:
-        retry_at = _iso(self._clock() + timedelta(seconds=retry_after_seconds))
-        with self._connect() as connection:
-            connection.execute(
-                "UPDATE notification_deliveries SET status = ?, next_attempt_at = ?, "
-                "last_error_code = ?, lease_owner = NULL, lease_expires_at = NULL "
-                "WHERE delivery_id = ? AND status = ?",
-                (
-                    DeliveryStatus.FAILED.value,
-                    retry_at,
-                    error_code,
-                    delivery_id,
-                    DeliveryStatus.LEASED.value,
-                ),
-            )
-
-    async def mark_delivery_terminal(self, delivery_id: str, error_code: str) -> None:
-        await asyncio.to_thread(
-            self._mark_delivery_terminal_sync,
-            delivery_id,
-            error_code,
-        )
-
-    def _mark_delivery_terminal_sync(self, delivery_id: str, error_code: str) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                "UPDATE notification_deliveries SET status = ?, next_attempt_at = NULL, "
-                "last_error_code = ?, lease_owner = NULL, lease_expires_at = NULL "
-                "WHERE delivery_id = ? AND status = ?",
-                (
-                    DeliveryStatus.DISCARDED.value,
-                    error_code,
-                    delivery_id,
-                    DeliveryStatus.LEASED.value,
-                ),
-            )
-
-    async def outbox_backlog(self) -> int:
-        return await asyncio.to_thread(self._outbox_backlog_sync)
-
-    def _outbox_backlog_sync(self) -> int:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT COUNT(DISTINCT event_id) AS count FROM notification_deliveries "
-                "WHERE status IN (?, ?) OR (status = ? AND next_attempt_at IS NOT NULL)",
-                (
-                    DeliveryStatus.PENDING.value,
-                    DeliveryStatus.LEASED.value,
-                    DeliveryStatus.FAILED.value,
-                ),
-            ).fetchone()
-        return int(row["count"] if row is not None else 0)
-
-    async def outbox_terminal_failure_count(self) -> int:
-        return await asyncio.to_thread(self._outbox_terminal_failure_count_sync)
-
-    def _outbox_terminal_failure_count_sync(self) -> int:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT COUNT(*) AS count FROM notification_deliveries "
-                "WHERE status = ?",
-                (DeliveryStatus.DISCARDED.value,),
-            ).fetchone()
-        return int(row["count"] if row is not None else 0)
-
-    async def finalize_event_if_required_delivered(self, event_id: str) -> bool:
-        return await asyncio.to_thread(
-            self._finalize_event_if_required_delivered_sync, event_id
-        )
-
-    def _finalize_event_if_required_delivered_sync(self, event_id: str) -> bool:
-        now = _iso(self._clock())
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                "SELECT e.payload_json, COUNT(CASE WHEN t.required = 1 AND d.status != ? "
-                "THEN 1 END) AS required_pending "
-                "FROM notification_outbox e "
-                "JOIN notification_deliveries d ON d.event_id = e.event_id "
-                "JOIN delivery_targets t ON t.delivery_target_id = d.delivery_target_id "
-                "WHERE e.event_id = ? GROUP BY e.event_id",
-                (DeliveryStatus.SUCCEEDED.value, event_id),
-            ).fetchone()
-            if row is None or int(row["required_pending"]) != 0:
-                connection.execute("COMMIT")
-                return False
-            payload: object = json.loads(row["payload_json"])
-            payload_dict = cast(dict[str, object], payload) if isinstance(payload, dict) else {}
-            delivered_snapshot: object = payload_dict.get("deliveredSnapshot")
-            if isinstance(delivered_snapshot, dict):
-                snapshot_json = _json(cast(dict[str, Any], delivered_snapshot))
-                connection.execute(
-                    "INSERT INTO probe_snapshots(snapshot_key, payload_json, updated_at) "
-                    "VALUES('delivered', ?, ?) ON CONFLICT(snapshot_key) DO UPDATE SET "
-                    "payload_json = excluded.payload_json, updated_at = excluded.updated_at",
-                    (snapshot_json, now),
-                )
-                connection.execute(
-                    "DELETE FROM probe_snapshots WHERE snapshot_key = 'pending' "
-                    "AND payload_json = ?",
-                    (snapshot_json,),
-                )
-            connection.execute("COMMIT")
-            return True
-        except Exception:
-            connection.execute("ROLLBACK")
-            raise
-        finally:
-            connection.close()
-
     async def set_snapshot(self, key: str, payload: dict[str, Any]) -> None:
         await asyncio.to_thread(self._set_snapshot_sync, key, payload)
 
@@ -1922,7 +1439,7 @@ class SqliteRepository:
         now: datetime | None = None,
         batch_size: int = 20_000,
     ) -> dict[str, int]:
-        """Delete bounded terminal history while preserving live retryable delivery work."""
+        """Delete bounded terminal history in row batches."""
         reference = now or self._clock()
         if reference.tzinfo is None:
             raise ValueError("retention time must be timezone-aware")
@@ -1941,16 +1458,12 @@ class SqliteRepository:
     ) -> dict[str, int]:
         cutoffs = {
             "jobs": _iso(now - timedelta(days=30)),
-            "deliveries": _iso(now - timedelta(days=30)),
             "audits": _iso(now - timedelta(days=365)),
             "now": _iso(now),
         }
         counts = {
             "expired_nonces": 0,
             "jobs": 0,
-            "succeeded_deliveries": 0,
-            "terminal_failed_deliveries": 0,
-            "outbox_events": 0,
             "audit_events": 0,
         }
         remaining = batch_size
@@ -1987,31 +1500,6 @@ class SqliteRepository:
                     JobStatus.INTERRUPTED.value,
                     cutoffs["jobs"],
                 ),
-            )
-            execute_bounded(
-                "succeeded_deliveries",
-                "DELETE FROM notification_deliveries WHERE rowid IN "
-                "(SELECT rowid FROM notification_deliveries WHERE status = ? "
-                "AND delivered_at IS NOT NULL AND delivered_at < ? "
-                "ORDER BY delivered_at LIMIT ?)",
-                (DeliveryStatus.SUCCEEDED.value, cutoffs["deliveries"]),
-            )
-            execute_bounded(
-                "terminal_failed_deliveries",
-                "DELETE FROM notification_deliveries WHERE rowid IN "
-                "(SELECT d.rowid FROM notification_deliveries d "
-                "JOIN notification_outbox o ON o.event_id = d.event_id "
-                "WHERE d.status = ? "
-                "AND o.created_at < ? ORDER BY o.created_at LIMIT ?)",
-                (DeliveryStatus.DISCARDED.value, cutoffs["deliveries"]),
-            )
-            execute_bounded(
-                "outbox_events",
-                "DELETE FROM notification_outbox WHERE rowid IN "
-                "(SELECT rowid FROM notification_outbox o WHERE o.created_at < ? "
-                "AND NOT EXISTS (SELECT 1 FROM notification_deliveries d "
-                "WHERE d.event_id = o.event_id) ORDER BY o.created_at LIMIT ?)",
-                (cutoffs["deliveries"],),
             )
             execute_bounded(
                 "audit_events",
@@ -2053,26 +1541,7 @@ class SqliteRepository:
             finished_at=_datetime(row["finished_at"]),
         )
 
-    @staticmethod
-    def _target_from_row(row: sqlite3.Row) -> DeliveryTargetRecord:
-        created_at = _datetime(row["created_at"])
-        updated_at = _datetime(row["updated_at"])
-        assert created_at is not None and updated_at is not None
-        return DeliveryTargetRecord.model_validate(
-            {
-                "delivery_target_id": row["delivery_target_id"],
-                "name": row["name"],
-                "bot_uuid": row["bot_uuid"],
-                "target_type": row["target_type"],
-                "target_id": row["target_id"],
-                "purposes": json.loads(row["purposes_json"]),
-                "media_policy": row["media_policy"],
-                "required": bool(row["required"]),
-                "enabled": bool(row["enabled"]),
-                "created_at": created_at,
-                "updated_at": updated_at,
-            }
-        )
+
 
     @staticmethod
     def _quarantine_from_row(row: sqlite3.Row) -> AccountQuarantineRecord:

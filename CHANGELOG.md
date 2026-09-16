@@ -25,6 +25,19 @@
 
 ### Removed
 
+- All external notification delivery was removed end to end.  The service
+  is scheduler-only: the LangBot adapter, delivery service, outbox worker,
+  delivery-target management, quiet hours, and every
+  notification/coalescing path in the scheduler and Guardian were deleted,
+  along with the `sub2api_list_delivery_bots`,
+  `sub2api_list_delivery_targets`, `sub2api_upsert_delivery_target`,
+  `sub2api_delete_delivery_target`, and `sub2api_test_delivery_target`
+  tools and the `SUB2API_MCP_LANGBOT_*`/`SUB2API_MCP_QUIET_HOURS_*`
+  settings.  Scheduler maintenance and Guardian recovery now run without
+  requiring an administrator delivery target, and their results are
+  persisted in local job/run records and Guardian events instead of a
+  push outbox.  On startup the legacy `notification_outbox`,
+  `notification_deliveries`, and `delivery_targets` tables are dropped.
 - The 实时路由, 探测费用, and 调度说明 pages were removed: the routing
   comparison only repeated channel-pool columns, and the spend/guard
   guides added no controls.  Probe-spend and budget data remain available

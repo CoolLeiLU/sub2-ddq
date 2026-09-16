@@ -56,90 +56,6 @@ class JobPage(StrictModel):
     next_cursor: str | None = None
 
 
-class TargetType(StrEnum):
-    PERSON = "person"
-    GROUP = "group"
-
-
-class DeliveryPurpose(StrEnum):
-    STATUS = "STATUS"
-    RECOVERY_ADMIN = "RECOVERY_ADMIN"
-    MAINTENANCE_ADMIN = "MAINTENANCE_ADMIN"
-    VIDEO_RESULT = "VIDEO_RESULT"
-
-
-class MediaPolicy(StrEnum):
-    AUTO = "AUTO"
-    TEXT_ONLY = "TEXT_ONLY"
-    IMAGE = "IMAGE"
-    FILE = "FILE"
-    LINK = "LINK"
-
-
-class DeliveryTargetCreate(StrictModel):
-    name: str = Field(min_length=1, max_length=100)
-    bot_uuid: str = Field(min_length=1, max_length=128)
-    target_type: TargetType
-    target_id: str = Field(min_length=1, max_length=512)
-    purposes: frozenset[DeliveryPurpose] = Field(min_length=1)
-    media_policy: MediaPolicy = MediaPolicy.AUTO
-    required: bool = True
-    enabled: bool = True
-
-    @model_validator(mode="after")
-    def protect_administrator_details(self) -> DeliveryTargetCreate:
-        administrator_purposes = {
-            DeliveryPurpose.RECOVERY_ADMIN,
-            DeliveryPurpose.MAINTENANCE_ADMIN,
-        }
-        if self.target_type is TargetType.GROUP and self.purposes & administrator_purposes:
-            raise ValueError("administrator delivery purposes require a person target")
-        return self
-
-
-class DeliveryTargetRecord(DeliveryTargetCreate):
-    delivery_target_id: str
-    created_at: datetime
-    updated_at: datetime
-
-
-class DeliveryTargetPage(StrictModel):
-    items: list[DeliveryTargetRecord]
-    next_cursor: str | None = None
-
-
-class OutboxEventType(StrEnum):
-    STATUS_CHANGED = "STATUS_CHANGED"
-    RECOVERY_RESULT = "RECOVERY_RESULT"
-    MAINTENANCE_RESULT = "MAINTENANCE_RESULT"
-    VIDEO_READY = "VIDEO_READY"
-    VIDEO_FAILED = "VIDEO_FAILED"
-
-
-class OutboxEventRecord(StrictModel):
-    event_id: str
-    event_type: OutboxEventType
-    payload: dict[str, Any]
-    created_at: datetime
-
-
-class DeliveryStatus(StrEnum):
-    PENDING = "PENDING"
-    LEASED = "LEASED"
-    SUCCEEDED = "SUCCEEDED"
-    FAILED = "FAILED"
-    DISCARDED = "DISCARDED"
-
-
-class ClaimedDelivery(StrictModel):
-    delivery_id: str
-    event_id: str
-    event_type: OutboxEventType
-    payload: dict[str, Any]
-    target: DeliveryTargetRecord
-    attempt: int
-
-
 class AccountBinding(StrictModel):
     actor_key: str
     user_id: str
@@ -343,46 +259,6 @@ class MaintenanceOutcomeBatch(StrictModel):
     items: list[MaintenanceOutcome] = Field(max_length=2000)
 
 
-class NotificationPayload(StrictModel):
-    text: str = Field(min_length=1, max_length=10000)
-    image_url: str | None = Field(default=None, max_length=2048)
-    image_base64: str | None = Field(default=None, max_length=16 * 1024 * 1024)
-    file_url: str | None = Field(default=None, max_length=2048)
-    file_name: str | None = Field(default=None, min_length=1, max_length=128)
-
-    @field_validator("image_url", "file_url")
-    @classmethod
-    def validate_external_url(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        parsed = urlsplit(value)
-        if (
-            parsed.scheme != "https"
-            or not parsed.hostname
-            or parsed.username is not None
-            or parsed.password is not None
-            or parsed.fragment
-        ):
-            raise ValueError("notification URLs must be absolute HTTPS URLs")
-        return value
-
-    @model_validator(mode="after")
-    def validate_file_name(self) -> NotificationPayload:
-        if self.file_url is not None and self.file_name is None:
-            raise ValueError("file_name is required with file_url")
-        return self
-
-
-class DeliveryResult(StrictModel):
-    used_fallback: bool = False
-
-
-class LangBotBot(StrictModel):
-    uuid: str
-    name: str
-    adapter: str
-
-
 class SubmitVideoInput(StrictModel):
     prompt: str = Field(min_length=1, max_length=2000)
     length: int = Field(default=22, ge=1, le=3600)
@@ -475,24 +351,3 @@ class ProbeResult(StrictModel):
         if self.captured_at is not None and self.captured_at.tzinfo is None:
             raise ValueError("captured_at must be timezone-aware")
         return self
-
-
-class OutboxPayload(StrictModel):
-    notification: NotificationPayload
-    dedup_key: str | None = Field(
-        default=None,
-        alias="dedupKey",
-        min_length=1,
-        max_length=128,
-        pattern=r"^[A-Za-z0-9._:-]+$",
-    )
-    coalesce_key: str | None = Field(
-        default=None,
-        alias="coalesceKey",
-        min_length=1,
-        max_length=128,
-        pattern=r"^[A-Za-z0-9._:-]+$",
-    )
-    delivered_snapshot: dict[str, Any] | None = Field(
-        default=None, alias="deliveredSnapshot"
-    )

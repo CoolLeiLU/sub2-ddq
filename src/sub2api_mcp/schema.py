@@ -1,6 +1,6 @@
 """SQLite schema for the Sub2API MCP service."""
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 ACCOUNT_QUARANTINE_TABLE_DDL = """
 CREATE TABLE IF NOT EXISTS account_quarantines (
@@ -101,46 +101,6 @@ CREATE INDEX IF NOT EXISTS idx_jobs_claim
     ON jobs(status, job_type, created_at, job_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_retention
     ON jobs(finished_at, status, job_id);
-CREATE TABLE IF NOT EXISTS delivery_targets (
-    delivery_target_id TEXT PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE,
-    bot_uuid TEXT NOT NULL,
-    target_type TEXT NOT NULL,
-    target_id TEXT NOT NULL,
-    purposes_json TEXT NOT NULL,
-    media_policy TEXT NOT NULL,
-    required INTEGER NOT NULL,
-    enabled INTEGER NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS notification_outbox (
-    event_id TEXT PRIMARY KEY,
-    event_type TEXT NOT NULL,
-    payload_json TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS notification_deliveries (
-    delivery_id TEXT PRIMARY KEY,
-    event_id TEXT NOT NULL
-        REFERENCES notification_outbox(event_id) ON DELETE CASCADE,
-    delivery_target_id TEXT NOT NULL
-        REFERENCES delivery_targets(delivery_target_id),
-    status TEXT NOT NULL,
-    attempts INTEGER NOT NULL DEFAULT 0,
-    lease_owner TEXT,
-    lease_expires_at TEXT,
-    next_attempt_at TEXT,
-    last_error_code TEXT,
-    delivered_at TEXT,
-    UNIQUE(event_id, delivery_target_id)
-);
-CREATE INDEX IF NOT EXISTS idx_deliveries_claim
-    ON notification_deliveries(status, next_attempt_at, lease_expires_at);
-CREATE INDEX IF NOT EXISTS idx_deliveries_retention
-    ON notification_deliveries(delivered_at, status, delivery_id);
-CREATE INDEX IF NOT EXISTS idx_outbox_created
-    ON notification_outbox(created_at, event_id);
 CREATE TABLE IF NOT EXISTS account_bindings (
     actor_key TEXT PRIMARY KEY,
     user_id TEXT NOT NULL UNIQUE,

@@ -1,9 +1,9 @@
 # Sub2API Scheduler MCP
 
 Independent MCP service for the complete Sub2API scheduling system. It reuses
-the existing hardened channel/account clients, persists scheduling state and
-jobs in SQLite, and delivers notifications through every messaging-platform
-bot registered in LangBot.
+the existing hardened channel/account clients and persists scheduling state,
+jobs, and Guardian events in SQLite. The service schedules directly; it does
+not depend on or push to any external messaging platform.
 
 This repository contains code and portable container artifacts only. No target
 server, domain, public port, or reverse proxy is assumed.
@@ -31,8 +31,6 @@ server, domain, public port, or reverse proxy is assumed.
   still honored. Manual pauses, expiry, and temporary unavailability are filtered before any test
   request.
 - Durable video jobs with user-selected length, steps, and resolution.
-- Platform-neutral LangBot delivery using bot UUID, `person/group`, and MessageChain.
-- Multi-target fan-out across different LangBot adapters.
 - Signed platform-neutral actor bridge for bind, unbind, and account queries.
 - Scoped MCP API keys, audit records, structured logs, metrics, and health checks.
 - Guardian health scoring, group/channel overrides, minimum-pool protection,
@@ -49,7 +47,7 @@ http://127.0.0.1:5310/guardian/
 Enter an access token carrying `sub2api:admin`. The browser keeps it only in
 page memory and clears it on refresh. The console contains eleven sections:
 overview, group scheduling, channel pool, account recovery, live routing, probe spend,
-scheduling guide, events, policy, connections, and information/notifications.
+scheduling guide, events, policy, connections, and information.
 
 Guardian has one direct scheduling switch and no observe/rollout mode. Start and emergency stop
 require confirmation, policy revision, and an idempotency key. When enabled, Guardian resolves a
@@ -59,10 +57,8 @@ names), applies bounded `load_factor` and baseline-relative
 `schedulable` changes remain tied to explicit conditional account tests.
 The policy page exposes the hourly health-check switch and interval. Its durable recovery ledger
 prevents repeat tests across the 15-second Guardian scan loop and across service restarts; routine
-successful checks are silent, while failures and state changes remain auditable and notify the
-recovery administrator.
-State transitions are queued to existing `STATUS` delivery targets, so the same
-LangBot fan-out can notify WeChat and every other configured adapter.
+successful checks are silent, while failures and state changes remain auditable through the
+console events page and the Guardian API.
 
 The authenticated REST API is rooted at `/api/guardian/v1`. Policy updates
 require an `If-Match` revision; run and action requests accept an
@@ -87,37 +83,11 @@ Scopes are `sub2api:read`, `sub2api:write`, `sub2api:admin`, and
 `sub2api:actor`. An admin token satisfies the read/write/admin tools. The actor
 scope is isolated from administrator tools.
 
-## All LangBot channels
-
-The service calls LangBot's existing authenticated bot-send API. It does not
-import or call individual platform SDKs. Every currently configured or future
-adapter works when it implements LangBot's common contract:
-
-```json
-{
-  "target_type": "person",
-  "target_id": "opaque-platform-id",
-  "message_chain": [{"type": "Plain", "text": "message"}]
-}
-```
-
-Use `sub2api_list_delivery_bots` to discover bots and
-`sub2api_upsert_delivery_target` to configure targets. `AUTO` media policy tries
-the requested image/file first and falls back to text plus an HTTPS link only
-when LangBot explicitly reports that media type as unsupported. Transient
-errors retry the original representation with bounded exponential backoff.
-Non-retryable payload errors are terminal and exposed separately from the live
-outbox backlog. Coalesced status and Guardian recovery streams retain only the
-latest pending notification per target after an outage.
-
 ## Tools
 
 - Status/read: `sub2api_get_status`, `sub2api_probe_channels`,
   `sub2api_get_job`, `sub2api_list_jobs`, `sub2api_get_bound_account`,
   `sub2api_list_account_quarantines`.
-- Delivery: `sub2api_list_delivery_bots`, `sub2api_list_delivery_targets`,
-  `sub2api_upsert_delivery_target`, `sub2api_delete_delivery_target`,
-  `sub2api_test_delivery_target`.
 - Scheduler/admin: `sub2api_set_scheduler_enabled`,
   `sub2api_submit_recovery`, `sub2api_submit_maintenance`.
 - Bindings: `sub2api_bind_account`, `sub2api_unbind_account`.
@@ -155,15 +125,12 @@ JSON array, for example:
 ```json
 [
   {
-    "name": "langbot",
+    "name": "admin",
     "token": "generate-at-least-32-random-characters",
     "scopes": ["sub2api:read", "sub2api:write", "sub2api:admin"]
   }
 ]
 ```
-
-HTTP LangBot URLs are rejected unless `SUB2API_MCP_LANGBOT_ALLOW_HTTP=true` is
-set explicitly. Use that only on trusted private/container networking.
 
 ## Container build
 
@@ -181,25 +148,6 @@ docker compose ps
 The image runs as UID/GID `10001`, drops all Linux capabilities, uses a
 read-only root filesystem in Compose, and writes only to `/data` and temporary
 memory.
-
-## Add to LangBot later
-
-After the destination host is chosen and the service is running, add a remote
-MCP server in LangBot with:
-
-```json
-{
-  "name": "sub2api-scheduler",
-  "mode": "remote",
-  "url": "http://<selected-host>:5310/mcp",
-  "headers": {"X-API-Key": "<mcp-token>"},
-  "enable": true
-}
-```
-
-Use HTTPS whenever the request crosses an untrusted network. Deployment and
-LangBot registration are intentionally deferred until a target machine is
-provided.
 
 ## Automatic deployment
 
@@ -219,9 +167,9 @@ The deployment workflow uses repository variables `DEPLOY_HOST`,
 
 ## Actor bridge
 
-Identity-sensitive commands cannot trust an LLM-supplied user ID. A generic
-LangBot command bridge should send the Workspace UUID, bot UUID, adapter,
-launcher type, and launcher ID to `/bridge/v1/actor`. Requests are signed over:
+Identity-sensitive commands cannot trust an LLM-supplied user ID. An external
+command bridge can send the Workspace UUID, bot UUID, adapter, launcher type,
+and launcher ID to `/bridge/v1/actor`. Requests are signed over:
 
 ```text
 <unix-timestamp>.<nonce>.<raw-request-body>

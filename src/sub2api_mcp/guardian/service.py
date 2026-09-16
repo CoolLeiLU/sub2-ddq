@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
 
-from ..contracts import DeliveryPurpose, JobRecord, JobType, NotificationPayload, OutboxEventType
+from ..contracts import JobRecord, JobType
 from ..errors import ServiceError
 from ..logging import log_event
 from ..metrics import Metrics
@@ -26,7 +26,6 @@ from .contracts import (
     AccountRecoveryRunTrigger,
     ChannelPolicyOverride,
     GroupPolicyOverride,
-    GuardianAccountRecoveryRecord,
     GuardianAccountRecoveryRun,
     GuardianPolicy,
     ManualControl,
@@ -61,54 +60,13 @@ def _merge_dict(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
-def _format_trigger_time(value: object) -> str:
-    triggered_at: datetime
-    if isinstance(value, datetime):
-        triggered_at = value
-    elif isinstance(value, str):
-        try:
-            triggered_at = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError:
-            triggered_at = datetime.now(UTC)
-    else:
-        triggered_at = datetime.now(UTC)
-    if triggered_at.tzinfo is None:
-        triggered_at = triggered_at.replace(tzinfo=UTC)
-    local = triggered_at.astimezone(ZoneInfo("Asia/Shanghai"))
-    return f"触发时间：{local:%Y-%m-%d %H:%M:%S}（北京时间）"
-
-
-_RECOVERY_REASON_LABELS = {
-    "verified": "已完成精确回读",
-    "verified_enabled": "已启用并完成精确回读",
-    "verified_disabled": "已禁用并完成精确回读",
-    "already_enabled": "原状态已启用",
-    "already_disabled": "原状态已禁用",
-    "healthy_no_change": "测活通过，账号状态保持不变",
-    "manual_pause": "人工暂停，保持不变",
-    "expired": "账号已过期，保持不变",
-    "temporary_unavailable": "临时不可调度，保持不变",
-    "account_state_unavailable": "账号状态无法确认",
-    "account_test_failed": "账号测试结果不确定",
-    "shared_unmonitored_scope_test_success": "探测通过；账号还属于未监控分组，未改动",
-    "shared_unmonitored_scope_test_definitive_failure": (
-        "探测失败；账号还属于未监控分组，未改动"
-    ),
-    "shared_unmonitored_scope_test_indeterminate": (
-        "探测结果不确定；账号还属于未监控分组，未改动"
-    ),
-    "shared_unmonitored_scope_test_skipped": "探测跳过；账号还属于未监控分组，未改动",
-    "run_stopped_after_unverified_mutation": "前项回读失败，本轮已安全停止",
-}
-
-
 class GuardianService:
     def __init__(
         self,
         repository: GuardianRepository,
         engine: GuardianEngine,
         metrics: Metrics | None = None,
-        notification_repository: SqliteRepository | None = None,
+        primary_repository: SqliteRepository | None = None,
         account_operations: AccountRecoveryOperations | None = None,
         plaza_operations: ModelPlazaOperations | None = None,
         clock: Callable[[], datetime] | None = None,
@@ -119,7 +77,7 @@ class GuardianService:
         self._stop = asyncio.Event()
         self._logger = logging.getLogger("sub2api_mcp.guardian")
         self._metrics = metrics
-        self._notification_repository = notification_repository
+        self._primary_repository = primary_repository
         self._clock = clock or (lambda: datetime.now(UTC))
         self._account_recovery = (
             AccountRecoveryExecutor(repository, account_operations, clock=self._clock)
@@ -131,7 +89,6 @@ class GuardianService:
             if plaza_operations is not None
             else None
         )
-        self._notified_account_recovery_run_ids: set[str] = set()
         self._metered_account_recovery_run_ids: set[str] = set()
         self._last_retention_at: datetime | None = None
         self._recovery_metric_requests = 0
@@ -271,15 +228,6 @@ class GuardianService:
             subject,
             result,
         )
-        await self._notify_control_event(
-            "Guardian 直接调度已启动" if enabled else "Guardian 直接调度已停止",
-            [
-                f"状态：{'启用' if enabled else '停止'}",
-                f"策略版本：{policy.revision}",
-                "原因：管理员显式确认",
-            ],
-            coalesce_key="guardian:scheduling",
-        )
         return result
 
     async def recovery_status(self, *, limit: int = 20) -> dict[str, Any]:
@@ -346,13 +294,13 @@ class GuardianService:
         )
         if saved is not None:
             return saved
-        if self._notification_repository is None:
+        if self._primary_repository is None:
             raise ServiceError(
                 "ACCOUNT_RECOVERY_ADAPTER_UNAVAILABLE",
                 "Durable recovery jobs are unavailable",
             )
         payload = await self.prepare_recovery_job()
-        created = await self._notification_repository.create_job_with_capacity(
+        created = await self._primary_repository.create_job_with_capacity(
             JobType.RECOVERY,
             payload,
             max_active=1,
@@ -384,13 +332,6 @@ class GuardianService:
         try:
             result = await self.engine.run_once(dry_run=dry_run, idempotency_key=idempotency_key)
             status = str(result.get("status", "unknown")).casefold()
-            run_result = cast(dict[str, Any], result.get("result") or {})
-            if (
-                status == "succeeded"
-                and not result.get("idempotent_replay")
-                and int(run_result.get("state_transitions", 0)) > 0
-            ):
-                await self._notify_run(result)
             await self._run_conditional_account_recovery(result)
             await self._after_run_operations(result)
             return result
@@ -452,24 +393,23 @@ class GuardianService:
             probe_prompt=policy.probe.prompt,
         )
         records = await self.repository.list_account_recovery_results(run.run_id)
-        if run.status is not AccountRecoveryRunStatus.RUNNING:
-            if (
-                self._metrics is not None
-                and run.run_id not in self._metered_account_recovery_run_ids
-            ):
-                allowed_results = {item.value for item in AccountRecoveryResult}
-                for record in records:
-                    if (
-                        run.trigger is AccountRecoveryRunTrigger.HOURLY_ACTIVE_CHECK
-                        and record.reason == "healthy_no_change"
-                    ):
-                        continue
-                    if record.result.value in allowed_results:
-                        self._metrics.guardian_account_recovery_results.labels(
-                            result=record.result.value
-                        ).inc()
-                self._metered_account_recovery_run_ids.add(run.run_id)
-            await self._notify_account_recovery(run, records)
+        if (
+            run.status is not AccountRecoveryRunStatus.RUNNING
+            and self._metrics is not None
+            and run.run_id not in self._metered_account_recovery_run_ids
+        ):
+            allowed_results = {item.value for item in AccountRecoveryResult}
+            for record in records:
+                if (
+                    run.trigger is AccountRecoveryRunTrigger.HOURLY_ACTIVE_CHECK
+                    and record.reason == "healthy_no_change"
+                ):
+                    continue
+                if record.result.value in allowed_results:
+                    self._metrics.guardian_account_recovery_results.labels(
+                        result=record.result.value
+                    ).inc()
+            self._metered_account_recovery_run_ids.add(run.run_id)
         return run
 
     async def prepare_recovery_job(self) -> dict[str, Any]:
@@ -483,7 +423,6 @@ class GuardianService:
                 "ACCOUNT_RECOVERY_NOT_GUARDIAN_OWNED",
                 "Guardian account recovery is not enabled and owned by Guardian",
             )
-        await self._require_recovery_admin_target()
         snapshot_id = await self.repository.latest_abnormal_account_snapshot()
         if snapshot_id is not None:
             return {
@@ -507,7 +446,6 @@ class GuardianService:
     async def handle_recovery(self, job: JobRecord) -> dict[str, Any]:
         if job.job_type is not JobType.RECOVERY:
             raise ValueError("Guardian can only handle recovery jobs")
-        await self._require_recovery_admin_target()
         payload = job.payload
         raw_snapshot_id = payload.get("snapshot_id")
         raw_trigger = payload.get("trigger")
@@ -549,24 +487,6 @@ class GuardianService:
             group_id=cast(str | None, group_id),
         )
         return {"recovery_run": run.model_dump(mode="json")}
-
-    async def _require_recovery_admin_target(self) -> list[str]:
-        if self._notification_repository is None:
-            raise ServiceError(
-                "RECOVERY_ADMIN_TARGET_REQUIRED",
-                "A personal administrator delivery target is required",
-            )
-        targets = [
-            target.delivery_target_id
-            for target in await self._notification_repository.list_delivery_targets()
-            if target.enabled and DeliveryPurpose.RECOVERY_ADMIN in target.purposes
-        ]
-        if not targets:
-            raise ServiceError(
-                "RECOVERY_ADMIN_TARGET_REQUIRED",
-                "A personal administrator delivery target is required",
-            )
-        return targets
 
     async def _run_conditional_account_recovery(
         self,
@@ -652,12 +572,12 @@ class GuardianService:
         return (now.astimezone(UTC) - latest.started_at).total_seconds() >= interval_seconds
 
     async def _quarantined_account_ids(self) -> frozenset[str]:
-        if self._notification_repository is None:
+        if self._primary_repository is None:
             return frozenset()
         account_ids: set[str] = set()
         cursor: str | None = None
         for _ in range(100):
-            page = await self._notification_repository.list_account_quarantines(
+            page = await self._primary_repository.list_account_quarantines(
                 limit=100,
                 cursor=cursor,
             )
@@ -670,88 +590,11 @@ class GuardianService:
                 "QUARANTINE_SCAN_LIMIT_REACHED",
                 "The quarantine registry exceeds the safe scan limit",
             )
-        intents = await self._notification_repository.list_account_quarantine_intents(
+        intents = await self._primary_repository.list_account_quarantine_intents(
             limit=10_000
         )
         account_ids.update(item.account_id for item in intents)
         return frozenset(account_ids)
-
-    async def _notify_account_recovery(
-        self,
-        run: GuardianAccountRecoveryRun,
-        records: list[GuardianAccountRecoveryRecord],
-    ) -> bool:
-        if run.trigger is AccountRecoveryRunTrigger.HOURLY_ACTIVE_CHECK:
-            records = [
-                item
-                for item in records
-                if not (
-                    item.result is AccountRecoveryResult.ENABLED
-                    and item.reason in {"already_enabled", "healthy_no_change"}
-                )
-            ]
-        if (
-            self._notification_repository is None
-            or run.run_id in self._notified_account_recovery_run_ids
-            or (run.status is AccountRecoveryRunStatus.SUCCEEDED and not records)
-        ):
-            return False
-        try:
-            targets = [
-                target.delivery_target_id
-                for target in await self._notification_repository.list_delivery_targets()
-                if target.enabled and DeliveryPurpose.RECOVERY_ADMIN in target.purposes
-            ]
-            if not targets:
-                return False
-            result_labels = {
-                "ENABLED": "已启用（已回读确认）",
-                "DISABLED": "已禁用（已回读确认）",
-                "INDETERMINATE": "状态不确定，未改动",
-                "SKIPPED": "已跳过",
-            }
-            details = [
-                (
-                    f"{index}. 账号 #{item.account_id}｜"
-                    f"渠道 {item.channel_id or '快照'}｜分组 {item.group_id or '未分组'}｜"
-                    f"{result_labels[item.result.value]}｜"
-                    f"{_RECOVERY_REASON_LABELS.get(item.reason, '已记录安全结果')}"
-                )
-                for index, item in enumerate(records[:30], start=1)
-            ]
-            if len(records) > len(details):
-                details.append(f"其余 {len(records) - len(details)} 项已写入 Guardian 账本")
-            summary = run.result or {}
-            notification = NotificationPayload(
-                text="\n".join(
-                    [
-                        "Guardian 账号恢复结果",
-                        _format_trigger_time(run.finished_at or run.started_at),
-                        f"触发：{run.trigger.value}",
-                        f"已测试：{summary.get('tested', 0)}｜启用：{summary.get('enabled', 0)}｜"
-                        f"禁用：{summary.get('disabled', 0)}｜不确定："
-                        f"{summary.get('indeterminate', 0)}｜跳过：{summary.get('skipped', 0)}",
-                        *details,
-                    ]
-                )
-            )
-            await self._notification_repository.enqueue_outbox(
-                OutboxEventType.RECOVERY_RESULT,
-                {
-                    "dedupKey": f"guardian:account-recovery:{run.run_id}",
-                    "coalesceKey": "guardian:account-recovery",
-                    "notification": notification.model_dump(mode="json", exclude_none=True),
-                },
-                targets,
-            )
-            self._notified_account_recovery_run_ids.add(run.run_id)
-            return True
-        except Exception:
-            self._logger.exception(
-                "guardian_account_recovery_notification_enqueue_failed",
-                extra={"recoveryRunId": run.run_id},
-            )
-            return False
 
     async def _after_run_operations(self, run: dict[str, Any]) -> None:
         try:
@@ -806,10 +649,10 @@ class GuardianService:
         started = time.monotonic()
         stores: tuple[tuple[str, GuardianRepository | SqliteRepository], ...] = (
             (("guardian", self.repository),)
-            if self._notification_repository is None
+            if self._primary_repository is None
             else (
                 ("guardian", self.repository),
-                ("primary", self._notification_repository),
+                ("primary", self._primary_repository),
             )
         )
         processed_total = 0
@@ -957,112 +800,6 @@ class GuardianService:
                 "daily_tokens": policy.recovery_budget.daily_tokens,
             },
         )
-        await self._notify_control_event(
-            "Guardian 恢复探测预算告警",
-            [
-                f"状态：{'已耗尽' if exhausted else '已达到 80%'}",
-                f"请求：{usage['request_count']} / {policy.recovery_budget.daily_requests}",
-                f"Token：{usage['total_tokens']} / {policy.recovery_budget.daily_tokens}",
-                "目标动作：停止新增恢复探测" if exhausted else "目标动作：继续监控预算",
-                "实际写回：否",
-                "原因：恢复探测硬预算保护",
-            ],
-            coalesce_key=f"guardian:budget:{now.date().isoformat()}",
-        )
-
-    async def _notify_run(self, run: dict[str, Any]) -> None:
-        if self._notification_repository is None:
-            return
-        try:
-            targets = [
-                target.delivery_target_id
-                for target in await self._notification_repository.list_delivery_targets()
-                if target.enabled and DeliveryPurpose.STATUS in target.purposes
-            ]
-            if not targets:
-                return
-            result = cast(dict[str, Any], run.get("result") or {})
-            transition_items = cast(
-                list[dict[str, Any]], result.get("transitions") or []
-            )
-            transition_lines: list[str] = []
-            for index, item in enumerate(transition_items[:10], start=1):
-                sources = cast(list[object], item.get("evidence_sources") or [])
-                source_text = "、".join(str(value) for value in sources) or "暂无"
-                age = int(item.get("evidence_age_seconds") or 0)
-                transition_lines.extend(
-                    [
-                        "",
-                        f"{index}. {item.get('name') or item.get('channel_id') or '未知渠道'}"
-                        f"（分组 {item.get('group_id') or '未分组'}）",
-                        f"   状态：{item.get('from', '—')} → {item.get('to', '—')}",
-                        f"   健康分：{float(item.get('score', 0)):.1f}｜"
-                        f"置信度：{float(item.get('confidence', 0)) * 100:.0f}%",
-                        f"   证据来源：{source_text}｜证据年龄：{age} 秒",
-                        f"   目标动作：{item.get('action', 'NO_CHANGE')}｜"
-                        f"探测：{item.get('event_type', '—')}｜"
-                        f"原因：{item.get('reason', '—')}",
-                    ]
-                )
-            detail_lines = (
-                ["", "渠道变化：", *transition_lines] if transition_lines else []
-            )
-            notification = NotificationPayload(
-                text="\n".join(
-                    [
-                        "Guardian 调度状态更新",
-                        _format_trigger_time(run.get("started_at")),
-                        f"评估渠道：{result.get('channels_evaluated', 0)}",
-                        f"状态变化：{result.get('state_transitions', 0)}",
-                        f"预期差异：{result.get('expected_changes', 0)}",
-                        *detail_lines,
-                    ]
-                )
-            )
-            await self._notification_repository.enqueue_outbox(
-                OutboxEventType.STATUS_CHANGED,
-                {
-                    "coalesceKey": "guardian:run",
-                    "notification": notification.model_dump(mode="json", exclude_none=True),
-                },
-                targets,
-            )
-        except Exception:
-            self._logger.exception(
-                "guardian_notification_enqueue_failed",
-                extra={"runId": run.get("run_id")},
-            )
-
-    async def _notify_control_event(
-        self,
-        title: str,
-        lines: list[str],
-        *,
-        coalesce_key: str | None = None,
-    ) -> None:
-        if self._notification_repository is None:
-            return
-        try:
-            targets = [
-                target.delivery_target_id
-                for target in await self._notification_repository.list_delivery_targets()
-                if target.enabled and DeliveryPurpose.STATUS in target.purposes
-            ]
-            if not targets:
-                return
-            notification = NotificationPayload(
-                text="\n".join([title, _format_trigger_time(datetime.now(UTC)), *lines])
-            )
-            await self._notification_repository.enqueue_outbox(
-                OutboxEventType.STATUS_CHANGED,
-                {
-                    "coalesceKey": coalesce_key or f"guardian:control:{title}",
-                    "notification": notification.model_dump(mode="json", exclude_none=True),
-                },
-                targets,
-            )
-        except Exception:
-            self._logger.exception("guardian_control_notification_enqueue_failed")
 
     async def cancel_run(self, run_id: str) -> dict[str, Any]:
         return await self.repository.cancel_run(run_id)

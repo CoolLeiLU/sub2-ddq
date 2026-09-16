@@ -18,7 +18,6 @@ from starlette.routing import Mount, Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .actor_bridge import ActorBridgeRequest, ActorRequestVerifier, ActorService
-from .adapters.langbot import LangBotClient
 from .adapters.video import LegacyVideoGenerator, VideoGenerator
 from .auth import ApiKeyAuthenticator, Principal, bind_principal
 from .bootstrap import bootstrap_legacy_core
@@ -30,7 +29,6 @@ from .contracts import (
     ProbeResult,
     QuarantineProbeAttempt,
 )
-from .delivery import DeliveryService, OutboxWorker
 from .errors import ServiceError
 from .guardian.account_recovery import AccountRecoveryOperations
 from .guardian.api import GuardianAPI
@@ -90,8 +88,6 @@ class Runtime:
     mcp: Sub2APIMCPServer
     guardian_repository: GuardianRepository
     guardian: GuardianService
-    langbot: LangBotClient | None
-    outbox: OutboxWorker | None
     actor_verifier: ActorRequestVerifier | None
     actor_service: ActorService | None
     started: bool = False
@@ -102,7 +98,6 @@ def build_runtime(
     *,
     operations: RuntimeOperations | None = None,
     video_generator: VideoGenerator | None = None,
-    langbot_client: LangBotClient | None = None,
 ) -> Runtime:
     if operations is None or video_generator is None:
         bootstrap_legacy_core(settings.legacy_core_root)
@@ -124,9 +119,6 @@ def build_runtime(
         maintenance_enabled=(
             settings.channel_account_sweep_enabled or settings.log_account_guard_enabled
         ),
-        quiet_hours_enabled=settings.quiet_hours_enabled,
-        quiet_hours_start=settings.quiet_hours_start,
-        quiet_hours_end=settings.quiet_hours_end,
     )
     scheduler = SchedulerService(repository, operations, metrics, scheduler_policy)
     video = VideoJobService(
@@ -135,15 +127,6 @@ def build_runtime(
         max_pending=settings.video_max_pending,
     )
 
-    langbot = langbot_client
-    if langbot is None and settings.langbot_base_url and settings.langbot_api_key:
-        langbot = LangBotClient(
-            settings.langbot_base_url,
-            settings.langbot_api_key.get_secret_value(),
-            timeout_seconds=settings.langbot_timeout_seconds,
-        )
-    delivery = DeliveryService(langbot) if langbot is not None else None
-    outbox = OutboxWorker(repository, delivery, metrics) if delivery is not None else None
     guardian = GuardianService(
         guardian_repository,
         GuardianEngine(
@@ -160,8 +143,6 @@ def build_runtime(
         operations=operations,
         scheduler=scheduler,
         video=video,
-        langbot=langbot,
-        delivery=delivery,
         video_enabled=settings.video_enabled,
         recovery_owner=guardian,
     )
@@ -205,8 +186,6 @@ def build_runtime(
         mcp=mcp,
         guardian_repository=guardian_repository,
         guardian=guardian,
-        langbot=langbot,
-        outbox=outbox,
         actor_verifier=actor_verifier,
         actor_service=actor_service,
     )
@@ -346,8 +325,6 @@ def create_app(runtime: Runtime) -> ASGIApp:
         await runtime.jobs.start(video_workers=runtime.settings.video_concurrency)
         await runtime.scheduler.start()
         await runtime.guardian.start()
-        if runtime.outbox is not None:
-            await runtime.outbox.start()
         runtime.started = True
         try:
             yield
@@ -356,10 +333,6 @@ def create_app(runtime: Runtime) -> ASGIApp:
             await runtime.guardian.stop()
             await runtime.scheduler.stop()
             await runtime.jobs.stop()
-            if runtime.outbox is not None:
-                await runtime.outbox.stop()
-            if runtime.langbot is not None:
-                await runtime.langbot.close()
             await session_manager.__aexit__(None, None, None)
 
     mcp_app = AuthenticatedASGI(runtime.mcp.streamable_http_app(), runtime.authenticator)

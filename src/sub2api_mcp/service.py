@@ -2,24 +2,18 @@
 
 from __future__ import annotations
 
-import hashlib
 import re
 from typing import Any, Protocol
 
 from . import __version__
 from .actor_bridge import ActorAccount
-from .adapters.langbot import LangBotClient
 from .contracts import (
     AccountQuarantineReason,
-    DeliveryTargetCreate,
-    DeliveryTargetRecord,
     JobStatus,
     JobType,
-    NotificationPayload,
     ProbeResult,
     SubmitVideoInput,
 )
-from .delivery import DeliveryService
 from .errors import ServiceError
 from .jobs import VideoJobService
 from .repository import SqliteRepository
@@ -46,8 +40,6 @@ class Sub2APIService:
         operations: ServiceOperations,
         scheduler: SchedulerService,
         video: VideoJobService,
-        langbot: LangBotClient | None,
-        delivery: DeliveryService | None,
         video_enabled: bool = True,
         recovery_owner: RecoveryJobOwner | None = None,
     ) -> None:
@@ -55,8 +47,6 @@ class Sub2APIService:
         self._operations = operations
         self._scheduler = scheduler
         self._video = video
-        self._langbot = langbot
-        self._delivery = delivery
         self._video_enabled = video_enabled
         self._recovery_owner = recovery_owner
 
@@ -69,17 +59,11 @@ class Sub2APIService:
             "version": __version__,
             "scheduler_enabled": await self._scheduler.is_enabled(),
             "active_jobs": job_counts,
-            "outbox_backlog": await self.repository.outbox_backlog(),
-            "outbox_terminal_failures": (
-                await self.repository.outbox_terminal_failure_count()
-            ),
-            "delivery_targets": len(await self.repository.list_delivery_targets()),
             "account_quarantine_count": await self.repository.account_quarantine_count(),
             "account_quarantine_counts": {
                 reason.value: await self.repository.account_quarantine_count(reason)
                 for reason in AccountQuarantineReason
             },
-            "langbot_configured": self._langbot is not None,
         }
 
     async def probe_channels(self) -> dict[str, Any]:
@@ -115,22 +99,6 @@ class Sub2APIService:
             "masked_email": binding.masked_email,
             "bound_at": binding.bound_at.isoformat(),
         }
-
-    async def list_delivery_bots(self) -> list[dict[str, Any]]:
-        if self._langbot is None:
-            raise ServiceError("LANGBOT_NOT_CONFIGURED", "LangBot delivery is not configured")
-        return [item.model_dump(mode="json") for item in await self._langbot.list_bots()]
-
-    async def list_delivery_targets(
-        self, limit: int = 20, cursor: str | None = None
-    ) -> dict[str, Any]:
-        page = await self.repository.list_delivery_targets_page(
-            limit=limit, cursor=cursor
-        )
-        targets: list[dict[str, Any]] = []
-        for item in page.items:
-            targets.append(self._redact_delivery_target(item))
-        return {"items": targets, "next_cursor": page.next_cursor}
 
     async def list_account_quarantines(
         self,
@@ -169,7 +137,6 @@ class Sub2APIService:
                 )
             payload = await self._recovery_owner.prepare_recovery_job()
         else:
-            await self._scheduler.require_control_target(job_type)
             payload = {}
         created = await self.repository.create_job_with_capacity(
             job_type, payload, max_active=1
@@ -207,28 +174,6 @@ class Sub2APIService:
     async def cancel_job(self, job_id: str) -> dict[str, Any]:
         return (await self.repository.cancel_job(job_id)).model_dump(mode="json")
 
-    async def upsert_delivery_target(
-        self, target: DeliveryTargetCreate
-    ) -> dict[str, Any]:
-        saved = await self.repository.upsert_delivery_target(target)
-        return self._redact_delivery_target(saved)
-
-    async def delete_delivery_target(self, delivery_target_id: str) -> dict[str, bool]:
-        await self.repository.delete_delivery_target(delivery_target_id)
-        return {"deleted": True}
-
-    async def test_delivery_target(self, delivery_target_id: str) -> dict[str, bool]:
-        if self._delivery is None:
-            raise ServiceError("LANGBOT_NOT_CONFIGURED", "LangBot delivery is not configured")
-        target = await self.repository.get_delivery_target(delivery_target_id)
-        if target is None or not target.enabled:
-            raise ServiceError("DELIVERY_TARGET_NOT_FOUND", "The delivery target does not exist")
-        await self._delivery.deliver(
-            target,
-            NotificationPayload(text="Sub2API MCP delivery test"),
-        )
-        return {"sent": True}
-
     async def audit(
         self, principal: str, action: str, subject: str | None, outcome: str
     ) -> None:
@@ -240,9 +185,3 @@ class Sub2APIService:
         if not re.fullmatch(r"v1:[0-9a-f]{64}", normalized):
             raise ServiceError("ACTOR_KEY_INVALID", "The actor key is invalid")
         return normalized
-
-    @staticmethod
-    def _redact_delivery_target(target: DeliveryTargetRecord) -> dict[str, Any]:
-        data = target.model_dump(mode="json", exclude={"target_id"})
-        data["target_ref"] = hashlib.sha256(target.target_id.encode()).hexdigest()[:16]
-        return data

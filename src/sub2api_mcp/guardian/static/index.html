@@ -187,8 +187,8 @@
           </section>
 
           <section class="page" id="page-info">
-            <div class="section-intro"><div><h2>信息与通知</h2><p>Guardian 事件通过现有 LangBot 全渠道投递架构发送，不绑定单一微信实现。</p></div></div>
-            <div class="dashboard-grid"><article class="panel prose"><p class="eyebrow">CURRENT RELEASE</p><h2>Guardian Scheduler 0.1</h2><p>独立实现的 Sub2API 健康守护与条件恢复系统。</p><dl class="info-list"><div><dt>API</dt><dd>/api/guardian/v1</dd></div><div><dt>界面</dt><dd>/guardian/</dd></div><div><dt>运行模式</dt><dd id="info-mode">健康守护已停止</dd></div></dl></article><article class="panel prose"><h2>通知事件</h2><ul class="check-list"><li>渠道降级、熔断、保底与恢复</li><li>账号恢复结果与开放故障事件</li><li>策略或守护范围变更</li></ul><p class="muted">通知目标继续在现有 MCP 投递目标中配置，可覆盖 LangBot 注册的全部机器人适配器。</p></article></div>
+            <div class="section-intro"><div><h2>信息</h2><p>Guardian 事件与运行结果持久化在本地状态库，通过本页面和 Guardian API 查询。</p></div></div>
+            <div class="dashboard-grid"><article class="panel prose"><p class="eyebrow">CURRENT RELEASE</p><h2>Guardian Scheduler 0.1</h2><p>独立实现的 Sub2API 健康守护与条件恢复系统。</p><dl class="info-list"><div><dt>API</dt><dd>/api/guardian/v1</dd></div><div><dt>界面</dt><dd>/guardian/</dd></div><div><dt>运行模式</dt><dd id="info-mode">健康守护已停止</dd></div></dl></article><article class="panel prose"><h2>守护事件</h2><ul class="check-list"><li>渠道降级、熔断、保底与恢复</li><li>账号恢复结果与开放故障事件</li><li>策略或守护范围变更</li></ul><p class="muted">事件记录在事件页签中按类型和时间查询，不再向外部推送。</p></article></div>
           </section>
         </main>
       </div>

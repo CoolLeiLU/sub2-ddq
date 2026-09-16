@@ -17,7 +17,7 @@ from pydantic import ValidationError
 
 from .auth import current_request_id, require_scope
 from .config import DEFAULT_ALLOWED_HOSTS, Scope
-from .contracts import DeliveryTargetCreate, JobStatus, JobType, SubmitVideoInput
+from .contracts import JobStatus, JobType, SubmitVideoInput
 from .errors import ServiceError
 from .guardian.service import GuardianService
 from .logging import log_event
@@ -26,11 +26,10 @@ from .service import Sub2APIService
 
 INSTRUCTIONS = """\
 This server manages the complete Sub2API scheduler: channel probes, account
-recovery and maintenance, durable video jobs, account bindings, and delivery
-through every bot adapter registered in LangBot. Prefer read tools before
-mutations. All identifiers are opaque. Never infer or invent platform user IDs.
-Treat exact chat messages `/zs`, `/zs status`, and `/zs 状态` as read-only
-requests for `sub2api_probe_channels`.
+recovery and maintenance, durable video jobs, and account bindings. Prefer
+read tools before mutations. All identifiers are opaque. Never infer or invent
+platform user IDs. Treat exact chat messages `/zs`, `/zs status`, and
+`/zs 状态` as read-only requests for `sub2api_probe_channels`.
 """
 
 
@@ -130,7 +129,7 @@ class Sub2APIMCPServer:
     def _register_tools(self) -> None:
         mcp = self.mcp
 
-        @mcp.tool(description="Get scheduler, job, outbox, delivery, and version status.")
+        @mcp.tool(description="Get scheduler, job, quarantine, and version status.")
         async def sub2api_get_status() -> str:
             return await self._execute(
                 "sub2api_get_status", "sub2api:read", self.service.get_status
@@ -175,22 +174,6 @@ class Sub2APIMCPServer:
                 "sub2api_get_bound_account",
                 "sub2api:read",
                 lambda: self.service.get_bound_account(actor_key),
-            )
-
-        @mcp.tool(description="Discover every bot adapter currently configured in LangBot.")
-        async def sub2api_list_delivery_bots() -> str:
-            return await self._execute(
-                "sub2api_list_delivery_bots",
-                "sub2api:read",
-                self.service.list_delivery_bots,
-            )
-
-        @mcp.tool(description="List platform-neutral LangBot delivery targets.")
-        async def sub2api_list_delivery_targets(limit: int = 20, cursor: str | None = None) -> str:
-            return await self._execute(
-                "sub2api_list_delivery_targets",
-                "sub2api:read",
-                lambda: self.service.list_delivery_targets(limit, cursor),
             )
 
         @mcp.tool(
@@ -290,54 +273,6 @@ class Sub2APIMCPServer:
                 lambda: self.service.cancel_job(job_id),
                 mutation=True,
                 subject=job_id,
-            )
-
-        @mcp.tool(description="Create or update a delivery target for any LangBot adapter.")
-        async def sub2api_upsert_delivery_target(
-            name: str,
-            bot_uuid: str,
-            target_type: str,
-            target_id: str,
-            purposes: list[str],
-            media_policy: str = "AUTO",
-            required: bool = True,
-            enabled: bool = True,
-        ) -> str:
-            return await self._execute(
-                "sub2api_upsert_delivery_target",
-                "sub2api:admin",
-                lambda: self._upsert_delivery_target(
-                    name,
-                    bot_uuid,
-                    target_type,
-                    target_id,
-                    purposes,
-                    media_policy,
-                    required,
-                    enabled,
-                ),
-                mutation=True,
-                subject=name,
-            )
-
-        @mcp.tool(description="Disable a delivery target idempotently.")
-        async def sub2api_delete_delivery_target(delivery_target_id: str) -> str:
-            return await self._execute(
-                "sub2api_delete_delivery_target",
-                "sub2api:admin",
-                lambda: self.service.delete_delivery_target(delivery_target_id),
-                mutation=True,
-                subject=delivery_target_id,
-            )
-
-        @mcp.tool(description="Send a test message through the selected LangBot adapter.")
-        async def sub2api_test_delivery_target(delivery_target_id: str) -> str:
-            return await self._execute(
-                "sub2api_test_delivery_target",
-                "sub2api:admin",
-                lambda: self.service.test_delivery_target(delivery_target_id),
-                mutation=True,
-                subject=delivery_target_id,
             )
 
         @mcp.tool(description="Get Guardian policy, defaults, and writeback approval state.")
@@ -580,31 +515,6 @@ class Sub2APIMCPServer:
                 "VALIDATION_ERROR", "The job type or status filter is invalid"
             ) from exc
         return await self.service.list_jobs(limit, cursor, parsed_type, parsed_status)
-
-    async def _upsert_delivery_target(
-        self,
-        name: str,
-        bot_uuid: str,
-        target_type: str,
-        target_id: str,
-        purposes: list[str],
-        media_policy: str,
-        required: bool,
-        enabled: bool,
-    ) -> dict[str, Any]:
-        target = DeliveryTargetCreate.model_validate(
-            {
-                "name": name,
-                "bot_uuid": bot_uuid,
-                "target_type": target_type,
-                "target_id": target_id,
-                "purposes": purposes,
-                "media_policy": media_policy,
-                "required": required,
-                "enabled": enabled,
-            }
-        )
-        return await self.service.upsert_delivery_target(target)
 
     def _guardian(self) -> GuardianService:
         if self.guardian is None:

@@ -1,7 +1,7 @@
 [project]
 name = "sub2api-scheduler-mcp"
 version = "0.1.0"
-description = "Deployment-neutral MCP service for the Sub2API scheduler and all LangBot delivery channels"
+description = "Deployment-neutral MCP service for the Sub2API scheduler and Guardian"
 readme = "README.md"
 requires-python = ">=3.11,<4.0"
 dependencies = [

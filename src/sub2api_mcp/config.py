@@ -73,9 +73,6 @@ class Settings(BaseSettings):
     scheduler_enabled: bool = False
     probe_interval_seconds: int = Field(default=60, ge=10, le=86400)
     scheduler_lease_seconds: int = Field(default=120, ge=30, le=3600)
-    quiet_hours_enabled: bool = False
-    quiet_hours_start: str = "23:00"
-    quiet_hours_end: str = "08:00"
 
     # Deprecated compatibility inputs. Guardian ignores the legacy periodic recovery window;
     # direct conditional recovery is controlled by GuardianPolicy.enabled and durable evidence.
@@ -91,11 +88,6 @@ class Settings(BaseSettings):
     slow_first_token_event_threshold: int = Field(default=3, ge=3, le=3)
     slow_first_token_ms: int = Field(default=30000, ge=1, le=600000)
     slow_first_token_window_minutes: int = Field(default=3, ge=3, le=3)
-
-    langbot_base_url: str | None = None
-    langbot_api_key: SecretStr | None = None
-    langbot_allow_http: bool = False
-    langbot_timeout_seconds: int = Field(default=15, ge=1, le=120)
 
     video_enabled: bool = False
     video_api_url: str = "https://h3.fzypod.com:9090/v1/video/generations"
@@ -113,8 +105,6 @@ class Settings(BaseSettings):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
     @field_validator(
-        "langbot_base_url",
-        "langbot_api_key",
         "actor_bridge_secret",
         mode="before",
     )
@@ -133,18 +123,6 @@ class Settings(BaseSettings):
         if len(token_values) != len(set(token_values)):
             raise ValueError("access token values must be unique")
 
-        if (self.langbot_base_url is None) != (self.langbot_api_key is None):
-            raise ValueError("langbot_base_url and langbot_api_key must be configured together")
-        if self.langbot_base_url is not None:
-            parsed = urlsplit(self.langbot_base_url.strip().rstrip("/"))
-            if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-                raise ValueError("langbot_base_url must be an absolute HTTP(S) URL")
-            if parsed.username or parsed.password or parsed.query or parsed.fragment:
-                raise ValueError("langbot_base_url cannot contain credentials, query, or fragment")
-            if parsed.scheme == "http" and not self.langbot_allow_http:
-                raise ValueError("set LANGBOT_ALLOW_HTTP=true to use an HTTP LangBot URL")
-            self.langbot_base_url = self.langbot_base_url.strip().rstrip("/")
-
         video_url = urlsplit(self.video_api_url.strip().rstrip("/"))
         if video_url.scheme != "https" or not video_url.hostname:
             raise ValueError("video_api_url must be an absolute HTTPS URL")
@@ -158,8 +136,6 @@ class Settings(BaseSettings):
         ):
             raise ValueError("actor_bridge_secret must contain at least 32 characters")
         for field_name in (
-            "quiet_hours_start",
-            "quiet_hours_end",
             "recovery_window_start",
             "recovery_window_end",
         ):

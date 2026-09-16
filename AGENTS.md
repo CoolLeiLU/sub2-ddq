@@ -23,12 +23,13 @@
 - MCP tools call the service layer; tools contain no scheduler, SQL, or HTTP logic.
 - All SQL is parameterized and wrapped in explicit transactions.
 - Logs are structured JSON with allowlisted fields; never log secrets, prompts, emails, or actor IDs.
-- Delivery uses LangBot's common bot UUID + person/group + MessageChain contract. Never branch on adapter names.
+- The service schedules directly; there is no external notification delivery. Guardian events are
+  persisted locally and exposed through the console and API.
 - Deployment addresses and credentials come only from environment configuration.
 
 ## Boundaries
 
-- Never modify LangBot core or its official image.
+- Never reintroduce external push/notification delivery.
 - Never reintroduce WeChatPad, recharge, transfer, or payment behavior.
 - Never automatically re-enable a manually paused account.
 - Never contact production services from tests.

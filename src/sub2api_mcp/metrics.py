@@ -35,9 +35,6 @@ class Metrics:
     retention_runs: Counter
     retention_rows: Counter
     database_size_bytes: Gauge
-    outbox_backlog: Gauge
-    outbox_terminal_failures: Gauge
-    outbox_oldest_age_seconds: Gauge
 
     @classmethod
     def create(cls) -> Metrics:
@@ -188,21 +185,6 @@ class Metrics:
             database_size_bytes=Gauge(
                 "sub2api_database_size_bytes",
                 "SQLite database, WAL, and shared-memory bytes",
-                registry=registry,
-            ),
-            outbox_backlog=Gauge(
-                "sub2api_outbox_backlog",
-                "Undelivered notification count",
-                registry=registry,
-            ),
-            outbox_terminal_failures=Gauge(
-                "sub2api_outbox_terminal_failures",
-                "Notifications stopped after a non-retryable delivery failure",
-                registry=registry,
-            ),
-            outbox_oldest_age_seconds=Gauge(
-                "sub2api_outbox_oldest_age_seconds",
-                "Age of the oldest undelivered notification",
                 registry=registry,
             ),
         )
