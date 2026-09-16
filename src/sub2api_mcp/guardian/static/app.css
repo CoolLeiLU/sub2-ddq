@@ -947,12 +947,31 @@ main {
 }
 
 .event-item {
-  display: grid;
-  grid-template-columns: 0.5rem minmax(10rem, 0.65fr) minmax(12rem, 2fr) auto;
-  align-items: center;
-  gap: var(--space-lg);
+  display: block;
   padding: var(--space-lg) 0;
   border-bottom: 1px solid var(--color-border);
+}
+
+.event-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
+.event-code {
+  color: var(--text-tertiary);
+  font-family: "Fira Code", ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.7rem;
+}
+
+.event-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs) var(--space-lg);
+  margin-top: var(--space-xs);
+  color: var(--text-tertiary);
+  font-size: 0.75rem;
 }
 
 .event-item:last-child {
@@ -985,11 +1004,13 @@ main {
 }
 
 .event-message {
+  margin: var(--space-xs) 0 0;
   color: var(--text-secondary);
   font-size: 0.8125rem;
 }
 
 .event-time {
+  margin-left: auto;
   color: var(--text-tertiary);
   font-size: 0.75rem;
   white-space: nowrap;
@@ -1599,12 +1620,9 @@ dialog::backdrop {
     display: none;
   }
 
-  .event-item {
-    grid-template-columns: 0.5rem 1fr auto;
-  }
-
-  .event-message {
-    grid-column: 2 / -1;
+  .event-time {
+    margin-left: 0;
+    width: 100%;
   }
 
   .form-grid,

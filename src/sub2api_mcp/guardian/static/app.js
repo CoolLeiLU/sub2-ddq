@@ -20,6 +20,108 @@ const pageMeta = {
   info: ["信息", "版本信息和守护事件说明"],
 };
 
+const eventTypeLabels = {
+  CHANNEL_HEALTHY: "渠道恢复健康",
+  CHANNEL_DEGRADED: "渠道降级",
+  CHANNEL_RATE_LIMITED: "渠道限流",
+  CHANNEL_FUSED: "渠道熔断",
+  CHANNEL_FORCED_KEEP: "渠道保底",
+  CHANNEL_PENDING: "渠道待评估",
+  CHANNEL_PAUSE: "渠道被人工暂停",
+  CHANNEL_RESUME: "渠道恢复调度",
+  CHANNEL_EXCLUDE: "渠道被排除",
+  CHANNEL_INCLUDE: "渠道重新纳入",
+  CHANNEL_FUSE: "渠道人工熔断",
+  CHANNEL_RECOVER: "渠道人工恢复",
+  POLICY_UPDATED: "策略已更新",
+  SCHEDULING_STARTED: "守护已启动",
+  SCHEDULING_STOPPED: "守护已停止",
+  GROUP_POLICY_UPDATED: "分组策略已更新",
+  GROUP_POLICY_CLEARED: "分组覆盖已清除",
+  CHANNEL_OVERRIDE_UPDATED: "渠道覆盖已更新",
+  SNAPSHOT_BACKLOG_COMPACTED: "快照积压已合并",
+  CHANNEL_GROUP_MAPPING_CONFLICT: "渠道分组映射冲突",
+  MODEL_PLAZA_REFRESHED: "模型广场已刷新",
+  RECOVERY_BUDGET_WARNING: "恢复预算告警",
+  RECOVERY_BUDGET_EXHAUSTED: "恢复预算耗尽",
+};
+
+const severityLabels = {
+  INFO: "信息",
+  WARNING: "警告",
+  ERROR: "错误",
+};
+
+const runStatusLabels = {
+  SUCCEEDED: "成功",
+  RUNNING: "运行中",
+  FAILED: "失败",
+  CANCELLED: "已取消",
+  INTERRUPTED: "已中断",
+};
+
+const triggerLabels = {
+  BAD_ACCOUNT_STATE: "异常账号快照",
+  CHANNEL_ERROR: "渠道故障事件",
+  HOURLY_ACTIVE_CHECK: "每小时健康检查",
+  MANUAL: "手动触发",
+  CONDITIONAL: "条件触发",
+};
+
+const actionLabels = {
+  NO_CHANGE: "无变更",
+  ENABLE: "启用",
+  DISABLE: "禁用",
+};
+
+const sourceLabels = {
+  SHARED_MONITOR: "共享监控",
+  TRAFFIC: "历史流量",
+  PROBE: "主动探测",
+  RECOVERY_PROBE: "恢复探测",
+  MANUAL_PROBE: "手动探测",
+};
+
+const sampleTypeLabels = {
+  PERFECT: "完美响应",
+  SLOW_TTFB: "首字缓慢",
+  UPSTREAM_UNKNOWN: "上游未知",
+  GATEWAY_ERROR: "网关错误",
+  QUOTA_EXHAUSTED: "限额耗尽",
+  PROBE_FAIL: "探测失败",
+  FATAL: "致命错误",
+};
+
+const ownerLabels = {
+  GUARDIAN: "Guardian 接管",
+  SCHEDULER: "调度器接管",
+};
+
+const reasonLabels = {
+  healthy: "恢复正常",
+  score_degraded: "评分下降",
+  fused: "已熔断",
+  recovered: "已恢复",
+  scope_pause: "守护范围暂停",
+  warming_up: "预热中",
+  excluded_group: "分组被排除",
+  excluded_channel: "渠道被排除",
+  outside_managed_groups: "不在守护分组内",
+  group_guard_disabled: "分组守护已停用",
+  round_fuse_limit: "达到本轮熔断上限",
+  evidence_fresh: "证据新鲜",
+  evidence_stale: "证据陈旧",
+  evidence_expired: "证据过期",
+};
+
+const channelActionLabels = {
+  probe: "探测",
+  pause: "暂停",
+  resume: "恢复",
+  exclude: "排除",
+  include: "纳入",
+};
+
 const policyFields = [
   ["#p-scan", "scan_interval_seconds", "number"],
   ["#p-sampling-mode", "sampling.mode", "string"],
@@ -126,6 +228,21 @@ function formatDate(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return String(value);
   return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(date);
+}
+
+function formatDateTime(value) {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
@@ -305,7 +422,7 @@ async function loadRecovery() {
   const data = await api("/recovery/status?limit=20");
   const episodes = data.open_episodes || [];
   const runs = data.recent_runs || [];
-  $("#recovery-owner").textContent = data.owner || "GUARDIAN";
+  $("#recovery-owner").textContent = ownerLabels[data.owner] || data.owner || "Guardian 接管";
   $("#recovery-owner-note").textContent = `重试冷却 ${data.retry_cooldown_seconds || 900} 秒`;
   $("#recovery-snapshot").textContent = data.latest_abnormal_snapshot ? "待处理" : "无";
   $("#recovery-episodes").textContent = episodes.length;
@@ -333,11 +450,15 @@ async function loadRecovery() {
     runs.forEach((item) => {
       const row = make("article", "recovery-item");
       const result = item.result || {};
-      const title = make("strong", "", `${item.trigger} · ${item.status}`);
+      const title = make(
+        "strong",
+        "",
+        `${triggerLabels[item.trigger] || item.trigger} · ${runStatusLabels[item.status] || item.status}`,
+      );
       const meta = make(
         "span",
         "muted",
-        `测试 ${result.tested || 0} · 启用 ${result.enabled || 0} · 禁用 ${result.disabled || 0} · 不确定 ${result.indeterminate || 0}`,
+        `测试 ${result.tested || 0} · 启用 ${result.enabled || 0} · 禁用 ${result.disabled || 0} · 不确定 ${result.indeterminate || 0} · ${formatDate(item.started_at || item.created_at)}`,
       );
       row.append(title, meta);
       runList.append(row);
@@ -439,8 +560,8 @@ function renderLastRun(run) {
   root.replaceChildren();
   const values = run
     ? [
-        ["状态", run.status],
-        ["开始时间", formatDate(run.started_at)],
+        ["状态", runStatusLabels[run.status] || run.status],
+        ["开始时间", formatDateTime(run.started_at)],
         ["评估渠道", run.result?.channels_evaluated ?? "—"],
         ["状态转换", run.result?.state_transitions ?? "—"],
         ["预期差异", run.result?.expected_changes ?? "—"],
@@ -453,6 +574,16 @@ function renderLastRun(run) {
   }
 }
 
+function eventTypeLabel(eventType) {
+  return eventTypeLabels[eventType] || eventType || "未知事件";
+}
+
+function severityBadge(severity) {
+  const value = String(severity || "INFO");
+  const className = value === "ERROR" ? "danger" : value === "WARNING" ? "warning" : "neutral";
+  return make("span", `badge ${className}`, severityLabels[value] || value);
+}
+
 function renderEvents(root, items, append = false) {
   if (!append) root.replaceChildren();
   if (!items.length && !append) {
@@ -461,12 +592,26 @@ function renderEvents(root, items, append = false) {
   }
   for (const event of items) {
     const item = make("div", "event-item");
-    item.append(
+    const head = make("div", "event-head");
+    head.append(
       make("span", `event-marker ${String(event.severity || "").toLowerCase()}`),
-      make("span", "event-type", event.event_type),
-      make("span", "event-message", event.message),
-      make("time", "event-time", formatDate(event.created_at)),
+      severityBadge(event.severity),
+      make("span", "event-type", eventTypeLabel(event.event_type)),
+      make("span", "event-code", event.event_type || ""),
+      make("time", "event-time", formatDateTime(event.created_at)),
     );
+    item.append(head);
+    item.append(make("p", "event-message", event.message || "—"));
+    const meta = make("div", "event-meta");
+    if (event.channel_id) meta.append(make("span", "", `渠道 ${event.channel_id}`));
+    if (event.group_id) meta.append(make("span", "", `分组 ${event.group_id}`));
+    const details = event.details || {};
+    for (const [key, value] of Object.entries(details)) {
+      if (value === null || value === undefined || value === "") continue;
+      const text = typeof value === "object" ? JSON.stringify(value) : String(value);
+      meta.append(make("span", "", `${key}: ${text}`));
+    }
+    if (meta.childElementCount) item.append(meta);
     root.append(item);
   }
 }
@@ -584,7 +729,8 @@ function channelRow(channel) {
   cell(row, freshnessBadge(channel.freshness_state));
   cell(row, channel.latency_ms == null ? "—" : `${channel.latency_ms} ms`);
   cell(row, statusBadge(channel.health));
-  cell(row, make("span", `badge ${channel.details?.expected_action === "NO_CHANGE" ? "success" : "warning"}`, channel.details?.expected_action || "—"));
+  const expectedAction = channel.details?.expected_action;
+  cell(row, make("span", `badge ${expectedAction === "NO_CHANGE" ? "success" : "warning"}`, actionLabels[expectedAction] || expectedAction || "—"));
   cell(row, statusBadge(channel.manual_control));
   const actions = make("div", "table-actions");
   actions.append(actionButton("探测", channel, "probe"));
@@ -622,7 +768,7 @@ async function channelAction(channelId, action) {
     headers: { "Idempotency-Key": `ui:${action}:${channelId}:${Date.now()}` },
     body: { action },
   });
-  toast(`渠道操作已提交：${action}`);
+  toast(`渠道操作已提交：${channelActionLabels[action] || action}`);
   await refreshPage(currentPage);
 }
 
@@ -641,15 +787,16 @@ async function showChannel(channelId) {
     ["分组", channel.group_id || "未分组"],
     ["健康分", formatNumber(channel.score)],
     ["置信度", `${formatNumber(Number(explanation.confidence || 0) * 100, 0)}%`],
-    ["证据状态", explanation.freshness_state],
-    ["证据来源", (explanation.evidence_sources || []).join("、") || "暂无"],
+    ["证据状态", freshnessBadge(explanation.freshness_state)],
+    ["证据来源", (explanation.evidence_sources || []).map((name) => sourceLabels[name] || name).join("、") || "暂无"],
     ["预热桶数", explanation.warmup_buckets ?? 0],
     ["监控探测模型", probeDetails.probe_model || "未提供"],
     ["监控协议", probeDetails.probe_api_mode || "默认"],
-    ["决策原因", explanation.reason || "暂无"],
+    ["决策原因", reasonLabels[explanation.reason] || explanation.reason || "暂无"],
   ]) {
     const item = make("div");
-    item.append(make("span", "", label), make("strong", "", value));
+    const valueNode = value instanceof Node ? value : make("strong", "", value);
+    item.append(make("span", "", label), valueNode);
     summary.append(item);
   }
   root.append(summary, make("h3", "", "最近评分样本"));
@@ -658,8 +805,8 @@ async function showChannel(channelId) {
   for (const sample of channel.samples || []) {
     const row = make("div", "sample-row");
     row.append(
-      make("span", "", sample.event_type),
-      make("span", "", sample.source),
+      make("span", "", sampleTypeLabels[sample.event_type] || sample.event_type),
+      make("span", "", sourceLabels[sample.source] || sample.source),
       make("strong", "", sample.score),
       make("time", "", formatDate(sample.occurred_at)),
     );
@@ -758,7 +905,7 @@ async function savePolicy(event) {
     });
     policyState = data.policy;
     fillPolicy(policyState);
-    toast(`策略 revision ${policyState.revision} 已保存`);
+    toast(`策略版本 ${policyState.revision} 已保存`);
     await loadStatus();
   } catch (error) {
     if (error.code === "POLICY_REVISION_CONFLICT") {

@@ -14,7 +14,7 @@
     <section class="login-screen" id="login-screen" aria-labelledby="login-title">
       <div class="login-card">
         <div class="brand-mark" aria-hidden="true">G</div>
-        <p class="eyebrow">SUB2API CONTROL PLANE</p>
+        <p class="eyebrow">SUB2API 调度控制台</p>
         <h1 id="login-title">Guardian 调度中心</h1>
         <p class="muted login-copy">监控渠道健康、执行有界调度，并统一处理异常账号恢复。</p>
         <form id="login-form">
@@ -34,7 +34,7 @@
       <aside class="sidebar" id="sidebar">
         <div class="sidebar-brand">
           <div class="brand-mark small" aria-hidden="true">G</div>
-          <div><strong>Guardian</strong><span>Sub2API Scheduler</span></div>
+          <div><strong>Guardian</strong><span>Sub2API 调度守护</span></div>
           <button class="mobile-close" id="close-sidebar" type="button" aria-label="关闭菜单"><svg class="control-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
         </div>
         <nav aria-label="Guardian 主菜单">
@@ -47,7 +47,7 @@
           <button class="nav-item" data-page="events" type="button"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M8 6h12M8 12h12M8 18h12"/><circle cx="4" cy="6" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="18" r="1"/></svg>事件日志</button>
           <button class="nav-item" data-page="policy" type="button"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6 1.7 1.7 0 0 0 10 3v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"/></svg>策略配置</button>
           <button class="nav-item" data-page="connection" type="button"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M9 15 15 9M7.5 17.5l-1 1a3.5 3.5 0 0 1-5-5l4-4a3.5 3.5 0 0 1 5 0M16.5 6.5l1-1a3.5 3.5 0 0 1 5 5l-4 4a3.5 3.5 0 0 1-5 0"/></svg>连接设置</button>
-          <button class="nav-item" data-page="info" type="button"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 10v7M12 7h.01"/></svg>信息与通知</button>
+          <button class="nav-item" data-page="info" type="button"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 10v7M12 7h.01"/></svg>信息</button>
         </nav>
         <div class="sidebar-footer">
           <div><span class="status-dot" id="sidebar-dot"></span><span id="sidebar-status">调度已停止</span></div>
@@ -112,7 +112,7 @@
             <div class="filter-bar">
               <label class="search-field"><span class="sr-only">搜索渠道</span><input id="channel-query" type="search" placeholder="搜索渠道名称或 ID"></label>
               <label><span class="sr-only">分组筛选</span><select id="channel-group"><option value="">全部分组</option></select></label>
-              <label><span class="sr-only">状态筛选</span><select id="channel-health"><option value="">全部状态</option><option>HEALTHY</option><option>DEGRADED</option><option>RATE_LIMITED</option><option>FUSED</option><option>FORCED_KEEP</option><option>MANUALLY_PAUSED</option><option>EXCLUDED</option></select></label>
+              <label><span class="sr-only">状态筛选</span><select id="channel-health"><option value="">全部状态</option><option value="HEALTHY">健康</option><option value="DEGRADED">降级</option><option value="RATE_LIMITED">限流</option><option value="FUSED">熔断</option><option value="FORCED_KEEP">强制保底</option><option value="MANUALLY_PAUSED">人工暂停</option><option value="EXCLUDED">已排除</option></select></label>
               <button class="secondary" id="channel-filter" type="button">应用筛选</button>
             </div>
             <article class="panel table-panel"><div class="table-scroll"><table><thead><tr><th>渠道</th><th>分组</th><th>健康分</th><th>置信度</th><th>证据新鲜度</th><th>延迟</th><th>Guardian</th><th>预期动作</th><th>人工控制</th><th>操作</th></tr></thead><tbody id="channels-table"></tbody></table></div><p class="empty" id="channels-empty">尚未同步渠道数据</p></article>
@@ -126,12 +126,12 @@
 
           <section class="page" id="page-events">
             <div class="section-intro"><div><h2>事件日志</h2><p>完整记录策略更新、状态迁移、人工动作和运行结果。</p></div></div>
-            <div class="filter-bar"><label><span class="sr-only">事件级别</span><select id="event-severity"><option value="">全部级别</option><option>INFO</option><option>WARNING</option><option>ERROR</option></select></label><label class="search-field"><span class="sr-only">事件类型</span><input id="event-type" placeholder="事件类型，例如 CHANNEL_FUSED"></label><button class="secondary" id="event-filter" type="button">应用筛选</button></div>
+            <div class="filter-bar"><label><span class="sr-only">事件级别</span><select id="event-severity"><option value="">全部级别</option><option value="INFO">信息</option><option value="WARNING">警告</option><option value="ERROR">错误</option></select></label><label class="search-field"><span class="sr-only">事件类型</span><input id="event-type" placeholder="事件类型，例如 CHANNEL_FUSED"></label><button class="secondary" id="event-filter" type="button">应用筛选</button></div>
             <article class="panel"><div class="event-list large" id="events-list"><p class="empty">暂无事件</p></div><button class="secondary load-more" id="events-more" type="button" hidden>加载更多</button></article>
           </section>
 
           <section class="page" id="page-policy">
-            <div class="section-intro"><div><h2>策略配置</h2><p>全局策略使用 revision 防止并发覆盖；调度启停使用独立确认流程。</p></div><div class="revision-label">Revision <strong id="policy-revision">—</strong></div></div>
+            <div class="section-intro"><div><h2>策略配置</h2><p>全局策略使用 revision 防止并发覆盖；调度启停使用独立确认流程。</p></div><div class="revision-label">策略版本 <strong id="policy-revision">—</strong></div></div>
             <div class="policy-tabs" role="tablist" aria-label="策略类别"><button class="active" role="tab" aria-selected="true" data-policy-tab="operations" type="button">运营配置</button><button role="tab" aria-selected="false" data-policy-tab="system" type="button">系统级规则</button><button role="tab" aria-selected="false" data-policy-tab="scope" type="button">守护范围</button></div>
             <form id="policy-form">
               <div class="policy-pane active" id="policy-operations" role="tabpanel">
@@ -188,7 +188,7 @@
 
           <section class="page" id="page-info">
             <div class="section-intro"><div><h2>信息</h2><p>Guardian 事件与运行结果持久化在本地状态库，通过本页面和 Guardian API 查询。</p></div></div>
-            <div class="dashboard-grid"><article class="panel prose"><p class="eyebrow">CURRENT RELEASE</p><h2>Guardian Scheduler 0.1</h2><p>独立实现的 Sub2API 健康守护与条件恢复系统。</p><dl class="info-list"><div><dt>API</dt><dd>/api/guardian/v1</dd></div><div><dt>界面</dt><dd>/guardian/</dd></div><div><dt>运行模式</dt><dd id="info-mode">健康守护已停止</dd></div></dl></article><article class="panel prose"><h2>守护事件</h2><ul class="check-list"><li>渠道降级、熔断、保底与恢复</li><li>账号恢复结果与开放故障事件</li><li>策略或守护范围变更</li></ul><p class="muted">事件记录在事件页签中按类型和时间查询，不再向外部推送。</p></article></div>
+            <div class="dashboard-grid"><article class="panel prose"><p class="eyebrow">当前版本</p><h2>Guardian Scheduler 0.1</h2><p>独立实现的 Sub2API 健康守护与条件恢复系统。</p><dl class="info-list"><div><dt>API</dt><dd>/api/guardian/v1</dd></div><div><dt>界面</dt><dd>/guardian/</dd></div><div><dt>运行模式</dt><dd id="info-mode">健康守护已停止</dd></div></dl></article><article class="panel prose"><h2>守护事件</h2><ul class="check-list"><li>渠道降级、熔断、保底与恢复</li><li>账号恢复结果与开放故障事件</li><li>策略或守护范围变更</li></ul><p class="muted">事件记录在事件页签中按类型和时间查询，不再向外部推送。</p></article></div>
           </section>
         </main>
       </div>
@@ -196,14 +196,14 @@
 
     <dialog id="group-dialog" aria-labelledby="group-dialog-title">
       <form method="dialog" class="dialog-card" id="group-form">
-        <div class="dialog-heading"><div><p class="eyebrow">GROUP OVERRIDE</p><h2 id="group-dialog-title">分组策略</h2></div><button class="icon-button" value="cancel" aria-label="关闭"><svg class="control-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+        <div class="dialog-heading"><div><p class="eyebrow">分组覆盖</p><h2 id="group-dialog-title">分组策略</h2></div><button class="icon-button" value="cancel" aria-label="关闭"><svg class="control-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
         <input id="group-id" type="hidden">
         <div class="form-grid"><label><span>最低可用渠道</span><input id="group-min-pool" type="number" min="0" placeholder="继承全局"></label><label><span>探测间隔（秒）</span><input id="group-probe-interval" type="number" min="30" step="30" placeholder="继承全局"></label></div>
         <div class="dialog-actions"><button class="danger-text" id="group-clear" type="button">清除覆盖</button><span></span><button class="secondary" value="cancel">取消</button><button class="primary" id="group-save" type="button">保存覆盖</button></div>
       </form>
     </dialog>
 
-    <dialog id="channel-dialog" aria-labelledby="channel-dialog-title"><div class="dialog-card wide-dialog"><div class="dialog-heading"><div><p class="eyebrow">CHANNEL DETAIL</p><h2 id="channel-dialog-title">渠道详情</h2></div><button class="icon-button" id="close-channel-dialog" type="button" aria-label="关闭"><svg class="control-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div><div id="channel-detail"></div><form id="channel-settings"><input id="channel-settings-id" type="hidden"><h3>渠道覆盖参数</h3><p class="muted">留空字段继承全局/分组策略。</p><div class="form-grid channel-settings-grid"><label><span>探测模型（留空跟随渠道监控）</span><input id="channel-probe-model" maxlength="200" placeholder="跟随监控"></label></div><div class="dialog-actions channel-dialog-actions"><span></span><button class="primary" type="submit">保存渠道设置</button></div></form></div></dialog>
+    <dialog id="channel-dialog" aria-labelledby="channel-dialog-title"><div class="dialog-card wide-dialog"><div class="dialog-heading"><div><p class="eyebrow">渠道详情</p><h2 id="channel-dialog-title">渠道详情</h2></div><button class="icon-button" id="close-channel-dialog" type="button" aria-label="关闭"><svg class="control-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div><div id="channel-detail"></div><form id="channel-settings"><input id="channel-settings-id" type="hidden"><h3>渠道覆盖参数</h3><p class="muted">留空字段继承全局/分组策略。</p><div class="form-grid channel-settings-grid"><label><span>探测模型（留空跟随渠道监控）</span><input id="channel-probe-model" maxlength="200" placeholder="跟随监控"></label></div><div class="dialog-actions channel-dialog-actions"><span></span><button class="primary" type="submit">保存渠道设置</button></div></form></div></dialog>
     <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
     <div class="sidebar-scrim" id="sidebar-scrim" hidden></div>
   </body>
