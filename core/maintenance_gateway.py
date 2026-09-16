@@ -426,7 +426,7 @@ class MaintenanceApiAdapter:
                 },
                 timeout_seconds=self._config.account_test_timeout_seconds,
             )
-            completed = account_test_result(body)
+            verdict = account_test_result(body)
         except (MonitorRequestError, MonitorDataError, UnicodeDecodeError):
             return AccountTestResult(
                 normalized_id,
@@ -436,13 +436,15 @@ class MaintenanceApiAdapter:
             )
         return AccountTestResult(
             normalized_id,
-            success=completed is True,
-            definitive_failure=completed is False,
+            success=verdict == "passed",
+            definitive_failure=verdict == "failed",
             reason=(
                 ""
-                if completed is True
+                if verdict == "passed"
                 else "test_failed"
-                if completed is False
+                if verdict == "failed"
+                else "test_routing_rejected"
+                if verdict == "routing_rejected"
                 else "test_incomplete"
             ),
             first_event_ms=first_event_ms,

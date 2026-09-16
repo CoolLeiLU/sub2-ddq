@@ -342,7 +342,15 @@ def _routing_layer_test_error(error: Any) -> bool:
     )
 
 
-def account_test_result(body: bytes) -> bool | None:
+def account_test_result(body: bytes) -> str:
+    """Parse the account test SSE stream into a verdict.
+
+    ``passed``/``failed`` are definitive; ``incomplete`` means the stream ran
+    without a verdict (the account's upstream hung); ``routing_rejected``
+    means the platform refused the request at its routing layer, which says
+    nothing about account health.
+    """
+
     if not isinstance(body, bytes) or not body:
         raise MonitorDataError("invalid account test response")
     try:
@@ -377,17 +385,19 @@ def account_test_result(body: bytes) -> bool | None:
             raise MonitorDataError("invalid account test event")
         if event["type"] == "error":
             if _routing_layer_test_error(event.get("error")):
-                return None
-            return False
+                return "routing_rejected"
+            return "failed"
         if event["type"] == "test_complete":
             if not isinstance(event.get("success"), bool) or completed is not None:
                 raise MonitorDataError("invalid account test completion")
             completed = event["success"]
-    return completed
+    if completed is None:
+        return "incomplete"
+    return "passed" if completed else "failed"
 
 
 def account_test_succeeded(body: bytes) -> bool:
-    return account_test_result(body) is True
+    return account_test_result(body) == "passed"
 
 
 def recovered_account_is_normal(

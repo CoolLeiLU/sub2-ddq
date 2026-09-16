@@ -52,8 +52,14 @@
   tested or mutated by account recovery.
 - Account recovery no longer treats Sub2API model-routing test errors
   (`model_not_found` / "not supported by any configured account in this group")
-  as definitive account failures; they now report `test_incomplete` so accounts
-  are not disabled (or kept disabled) when the test model cannot be routed.
+  as definitive account failures; they now report `test_routing_rejected` so
+  accounts are not disabled (or kept disabled) when the test model cannot be
+  routed.
+- Account probes that reach the account but never produce a verdict (hung
+  upstream stream → `test_incomplete`) now disable the account instead of
+  leaving it enabled forever; a later passing probe re-enables it.  Platform-
+  side indeterminate causes (the test endpoint or dispatch state itself being
+  unreachable) still do not mutate accounts.
 
 ### Removed
 

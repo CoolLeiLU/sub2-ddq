@@ -480,8 +480,23 @@ class AccountRecoveryExecutor:
             )
         if tested.result is AccountTestExecutionResult.SKIPPED:
             return AccountRecoveryResult.SKIPPED, tested.reason, tested.attempted, False
-        if tested.result is AccountTestExecutionResult.INDETERMINATE:
-            return AccountRecoveryResult.INDETERMINATE, tested.reason, tested.attempted, False
+        # test_incomplete means the probe reached the account but the
+        # upstream never produced a verdict (hung stream).  An account that
+        # cannot complete a probe cannot be trusted to serve traffic, so it
+        # leaves the pool until a later probe confirms it healthy.  Other
+        # indeterminate causes (the admin test endpoint, dispatch state, or
+        # the platform routing layer itself being unreachable) are
+        # platform-side faults that must not take accounts offline.
+        if (
+            tested.result is AccountTestExecutionResult.INDETERMINATE
+            and tested.reason != "test_incomplete"
+        ):
+            return (
+                AccountRecoveryResult.INDETERMINATE,
+                tested.reason,
+                tested.attempted,
+                False,
+            )
         if (
             trigger is AccountRecoveryRunTrigger.HOURLY_ACTIVE_CHECK
             and tested.result is AccountTestExecutionResult.SUCCESS
@@ -526,7 +541,10 @@ class AccountRecoveryExecutor:
             AccountMutationResult.APPLIED,
             AccountMutationResult.NO_CHANGE,
         }:
-            return expected, mutation.reason, tested.attempted, False
+            reason = mutation.reason
+            if tested.result is AccountTestExecutionResult.INDETERMINATE:
+                reason = f"{tested.reason}:{mutation.reason}"
+            return expected, reason, tested.attempted, False
         if not mutation.attempted and mutation.result is AccountMutationResult.BLOCKED:
             return AccountRecoveryResult.SKIPPED, mutation.reason, tested.attempted, False
         return (
