@@ -130,7 +130,7 @@ def select_account_recovery_candidates(
         )
         writeback_allowed = (
             bool(monitored_memberships)
-            and not shared_with_unmonitored_group
+            and (channel_scope or not shared_with_unmonitored_group)
             and classification
             not in {
                 AccountRecoveryClassification.MANUAL_PAUSE,
@@ -243,7 +243,7 @@ class AccountRecoveryExecutor:
         if trigger is AccountRecoveryRunTrigger.CHANNEL_ERROR:
             if episode_id is None:
                 raise ValueError("channel-error recovery requires an episode ID")
-            return f"episode:{episode_id}:channel-error"
+            return f"snapshot:{snapshot_id}:episode:{episode_id}:channel-error"
         if trigger is AccountRecoveryRunTrigger.MANUAL:
             return f"snapshot:{snapshot_id}:manual:{group_id or 'all'}"
         if trigger is AccountRecoveryRunTrigger.HOURLY_ACTIVE_CHECK:
@@ -490,6 +490,7 @@ class AccountRecoveryExecutor:
         if (
             tested.result is AccountTestExecutionResult.INDETERMINATE
             and tested.reason != "test_incomplete"
+            and trigger is not AccountRecoveryRunTrigger.CHANNEL_ERROR
         ):
             return (
                 AccountRecoveryResult.INDETERMINATE,
@@ -542,7 +543,7 @@ class AccountRecoveryExecutor:
             AccountMutationResult.NO_CHANGE,
         }:
             reason = mutation.reason
-            if tested.result is AccountTestExecutionResult.INDETERMINATE:
+            if tested.result is not AccountTestExecutionResult.SUCCESS and tested.reason:
                 reason = f"{tested.reason}:{mutation.reason}"
             return expected, reason, tested.attempted, False
         if not mutation.attempted and mutation.result is AccountMutationResult.BLOCKED:

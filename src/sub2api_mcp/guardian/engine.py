@@ -293,6 +293,7 @@ class GuardianEngine:
         duplicate_observations = 0
         traffic_buckets_processed = 0
         account_recovery_triggers: list[dict[str, str]] = []
+        seen_channel_triggers: set[tuple[str, str]] = set()
         channel_mapping_conflicts = 0
 
         for entry in snapshot.entries:
@@ -346,7 +347,9 @@ class GuardianEngine:
                             snapshot_id=snapshot_id,
                             opened_at=captured_at,
                         )
-                        if episode.opened_snapshot_id == snapshot_id:
+                        trigger_target = (episode.channel_id, entry.group_id)
+                        if trigger_target not in seen_channel_triggers:
+                            seen_channel_triggers.add(trigger_target)
                             account_recovery_triggers.append(
                                 {
                                     "episode_id": episode.episode_id,
