@@ -453,16 +453,52 @@ class AccountRecoveryExecutor:
         probe_mode: str = "",
     ) -> tuple[AccountRecoveryResult, str, bool, bool]:
         account_id = initial_account.account_id
+        effective_model = probe_model
+        preferred_model = await self._repository.get_account_preferred_model(account_id)
+        if preferred_model:
+            effective_model = preferred_model
+
         try:
             tested = await self._operations.guardian_test_account(
                 account_id,
                 initial_account=initial_account,
-                model_id=probe_model,
+                model_id=effective_model,
                 prompt=probe_prompt,
                 mode=probe_mode,
             )
         except Exception:
             return AccountRecoveryResult.INDETERMINATE, "account_test_failed", True, False
+
+        # Fallback strategy: if tested model was gpt-5.6-terra and it failed, retry with gpt-5.6-sol
+        if (
+            not tested.success
+            and effective_model == "gpt-5.6-terra"
+            and writeback_allowed
+        ):
+            try:
+                fallback_tested = await self._operations.guardian_test_account(
+                    account_id,
+                    initial_account=initial_account,
+                    model_id="gpt-5.6-sol",
+                    prompt=probe_prompt,
+                    mode=probe_mode,
+                )
+                if fallback_tested.success:
+                    tested = fallback_tested
+                    effective_model = "gpt-5.6-sol"
+                    await self._repository.set_account_preferred_model(account_id, "gpt-5.6-sol")
+                else:
+                    # If sol also fails, clear preference
+                    await self._repository.set_account_preferred_model(account_id, None)
+            except Exception:
+                pass
+        elif not tested.success and preferred_model:
+            # If account failed on its preferred model (e.g. sol), reset preferred model
+            await self._repository.set_account_preferred_model(account_id, None)
+        elif tested.success and effective_model == "gpt-5.6-terra" and preferred_model:
+            # If terra succeeded and there was an old preference, reset it
+            await self._repository.set_account_preferred_model(account_id, None)
+
         if tested.account_id != account_id:
             return AccountRecoveryResult.INDETERMINATE, "test_identity_mismatch", True, False
         if not writeback_allowed:

@@ -271,6 +271,11 @@ CREATE TABLE IF NOT EXISTS guardian_account_recovery_ledger (
     tested INTEGER NOT NULL CHECK (tested IN (0, 1)),
     occurred_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS guardian_account_preferences (
+    account_id TEXT PRIMARY KEY,
+    preferred_probe_model TEXT,
+    updated_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_guardian_account_recovery_ledger_run
     ON guardian_account_recovery_ledger(run_id, occurred_at, ledger_id);
 CREATE INDEX IF NOT EXISTS idx_guardian_account_recovery_ledger_recent
@@ -3275,6 +3280,41 @@ class GuardianRepository:
                 "(SELECT rowid FROM guardian_idempotency "
                 "ORDER BY created_at DESC LIMIT 10000)"
             )
+
+    async def get_account_preferred_model(self, account_id: str) -> str | None:
+        return await asyncio.to_thread(self._get_account_preferred_model_sync, account_id)
+
+    def _get_account_preferred_model_sync(self, account_id: str) -> str | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT preferred_probe_model FROM guardian_account_preferences "
+                "WHERE account_id = ?",
+                (account_id,),
+            ).fetchone()
+            if row is None or not row["preferred_probe_model"]:
+                return None
+            return str(row["preferred_probe_model"])
+
+    async def set_account_preferred_model(self, account_id: str, model: str | None) -> None:
+        await asyncio.to_thread(self._set_account_preferred_model_sync, account_id, model)
+
+    def _set_account_preferred_model_sync(self, account_id: str, model: str | None) -> None:
+        now = _iso(self._clock())
+        with self._connect() as connection:
+            if model:
+                connection.execute(
+                    "INSERT INTO guardian_account_preferences("
+                    "account_id, preferred_probe_model, updated_at) VALUES(?, ?, ?) "
+                    "ON CONFLICT(account_id) DO UPDATE SET "
+                    "preferred_probe_model = excluded.preferred_probe_model, "
+                    "updated_at = excluded.updated_at",
+                    (account_id, model, now),
+                )
+            else:
+                connection.execute(
+                    "DELETE FROM guardian_account_preferences WHERE account_id = ?",
+                    (account_id,),
+                )
 
     @staticmethod
     def _account_observation_from_row(

@@ -548,20 +548,6 @@ class GuardianService:
             already_processed_account_ids=frozenset(processed),
         )
         completed_runs.append(bad_state_run)
-        bad_state_records = await self.repository.list_account_recovery_results(
-            bad_state_run.run_id
-        )
-        processed.update(item.account_id for item in bad_state_records if item.tested)
-        if policy.probe.enabled and await self._hourly_active_check_due(
-            interval_seconds=policy.probe.interval_seconds
-        ):
-            completed_runs.append(
-                await self.execute_account_recovery(
-                    snapshot_id=snapshot_id,
-                    trigger=AccountRecoveryRunTrigger.HOURLY_ACTIVE_CHECK,
-                    already_processed_account_ids=frozenset(processed),
-                )
-            )
         result["account_recovery_runs"] = [
             item.model_dump(mode="json") for item in completed_runs
         ]
