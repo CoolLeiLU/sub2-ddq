@@ -32,6 +32,10 @@ def _semantic_group_key(value: str) -> str:
     text = "".join(sorted(_WHITESPACE_PATTERN.split(text.strip().casefold())))
     if text.endswith("渠道"):
         text = text[: -len("渠道")]
+    if text.endswith("分组"):
+        text = text[: -len("分组")]
+    elif text.endswith("组"):
+        text = text[:-1]
     if text.endswith("级"):
         text = text[:-1]
     return text

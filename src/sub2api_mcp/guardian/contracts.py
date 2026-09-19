@@ -503,7 +503,7 @@ class GuardianPolicy(StrictModel):
         )
         raw_interval = probe.get("interval_seconds")
         if (
-            isinstance(raw_interval, (int, float))
+            isinstance(raw_interval, int | float)
             and not isinstance(raw_interval, bool)
             and raw_interval < 3600
         ):
