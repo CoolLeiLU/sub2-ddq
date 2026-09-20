@@ -471,7 +471,7 @@ class AccountRecoveryExecutor:
 
         # Fallback strategy: if tested model was gpt-5.6-terra and it failed, retry with gpt-5.6-sol
         if (
-            not tested.success
+            tested.result is not AccountTestExecutionResult.SUCCESS
             and effective_model == "gpt-5.6-terra"
             and writeback_allowed
         ):
@@ -483,7 +483,7 @@ class AccountRecoveryExecutor:
                     prompt=probe_prompt,
                     mode=probe_mode,
                 )
-                if fallback_tested.success:
+                if fallback_tested.result is AccountTestExecutionResult.SUCCESS:
                     tested = fallback_tested
                     effective_model = "gpt-5.6-sol"
                     await self._repository.set_account_preferred_model(account_id, "gpt-5.6-sol")
@@ -492,10 +492,14 @@ class AccountRecoveryExecutor:
                     await self._repository.set_account_preferred_model(account_id, None)
             except Exception:
                 pass
-        elif not tested.success and preferred_model:
+        elif tested.result is not AccountTestExecutionResult.SUCCESS and preferred_model:
             # If account failed on its preferred model (e.g. sol), reset preferred model
             await self._repository.set_account_preferred_model(account_id, None)
-        elif tested.success and effective_model == "gpt-5.6-terra" and preferred_model:
+        elif (
+            tested.result is AccountTestExecutionResult.SUCCESS
+            and effective_model == "gpt-5.6-terra"
+            and preferred_model
+        ):
             # If terra succeeded and there was an old preference, reset it
             await self._repository.set_account_preferred_model(account_id, None)
 
