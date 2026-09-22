@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Callable, Sequence
 from contextlib import suppress
@@ -291,6 +292,25 @@ class AccountRecoveryExecutor:
                 "Another Guardian account recovery run is active",
             )
         run: GuardianAccountRecoveryRun | None = None
+        lease_lost = asyncio.Event()
+
+        async def renew_lease() -> None:
+            try:
+                while True:
+                    await asyncio.sleep(40)
+                    if not await self._repository.acquire_lease(
+                        "account-recovery",
+                        owner,
+                        seconds=120,
+                    ):
+                        lease_lost.set()
+                        return
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                lease_lost.set()
+
+        heartbeat = asyncio.create_task(renew_lease(), name=f"guardian-lease-{owner}")
         counts = {
             "selected": 0,
             "tested": 0,
@@ -374,6 +394,8 @@ class AccountRecoveryExecutor:
             selected = [item for item in selection.decisions if item.selected]
             stop_remaining = False
             for decision in selected:
+                if lease_lost.is_set():
+                    raise RuntimeError("Guardian account recovery lease was lost")
                 account_id = decision.account.account_id
                 if stop_remaining:
                     final_result = AccountRecoveryResult.SKIPPED
@@ -440,6 +462,9 @@ class AccountRecoveryExecutor:
                     )
             raise
         finally:
+            heartbeat.cancel()
+            with suppress(asyncio.CancelledError):
+                await heartbeat
             await self._repository.release_lease("account-recovery", owner)
 
     async def _execute_account(

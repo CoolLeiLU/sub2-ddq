@@ -75,6 +75,7 @@ class GuardianService:
         self.engine = engine
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
+        self._wake = asyncio.Event()
         self._logger = logging.getLogger("sub2api_mcp.guardian")
         self._metrics = metrics
         self._primary_repository = primary_repository
@@ -105,6 +106,7 @@ class GuardianService:
         if self._task is None:
             return
         self._stop.set()
+        self._wake.set()
         await self._task
         self._task = None
 
@@ -112,17 +114,20 @@ class GuardianService:
         while not self._stop.is_set():
             try:
                 policy = await self.repository.get_policy()
-                await asyncio.wait_for(self._stop.wait(), timeout=policy.scan_interval_seconds)
-                continue
+                await asyncio.wait_for(self._wake.wait(), timeout=policy.scan_interval_seconds)
+                self._wake.clear()
+                if self._stop.is_set():
+                    break
             except TimeoutError:
                 pass
             if self._stop.is_set():
                 break
-            await self._run_retention_if_due(now=datetime.now(UTC))
+            now = self._clock()
+            await self._run_retention_if_due(now=now)
             try:
                 policy = await self.repository.get_policy()
                 if policy.enabled:
-                    slot = int(datetime.now(UTC).timestamp()) // policy.scan_interval_seconds
+                    slot = int(now.timestamp()) // policy.scan_interval_seconds
                     await self.run_once(dry_run=False, idempotency_key=f"scheduled:{slot}")
             except Exception:
                 self._logger.exception("guardian_scheduled_cycle_failed")
@@ -152,6 +157,7 @@ class GuardianService:
         except ValidationError:
             raise
         saved = await self.repository.update_policy(candidate, expected_revision=expected_revision)
+        self._wake.set()
         await self.repository.add_event(
             event_type="POLICY_UPDATED",
             severity="INFO",
@@ -345,7 +351,11 @@ class GuardianService:
         try:
             result = await self.engine.run_once(dry_run=dry_run, idempotency_key=idempotency_key)
             status = str(result.get("status", "unknown")).casefold()
-            await self._run_conditional_account_recovery(result)
+            # A dry run is an evaluation-only operation.  Account recovery
+            # performs real upstream mutations (disable/restore), so it must
+            # never run as a side effect of a read-only Guardian evaluation.
+            if not dry_run:
+                await self._run_conditional_account_recovery(result)
             await self._after_run_operations(result)
             return result
         finally:

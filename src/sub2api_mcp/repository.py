@@ -112,6 +112,21 @@ class SqliteRepository:
                     JobStatus.RUNNING.value,
                 ),
             )
+            connection.execute(
+                "UPDATE jobs SET status = ?, error_code = ?, error_message = ?, "
+                "updated_at = ?, finished_at = ?, worker_id = NULL "
+                "WHERE job_type = ? AND status IN (?, ?)",
+                (
+                    JobStatus.FAILED.value,
+                    "VIDEO_REMOVED",
+                    "Video generation is no longer supported",
+                    now,
+                    now,
+                    JobType.VIDEO.value,
+                    JobStatus.QUEUED.value,
+                    JobStatus.RUNNING.value,
+                ),
+            )
 
     @staticmethod
     def _current_schema_version(connection: sqlite3.Connection) -> int:

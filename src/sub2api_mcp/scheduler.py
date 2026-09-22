@@ -123,8 +123,35 @@ class SchedulerService:
 
     async def handle_probe(self, job: JobRecord) -> dict[str, Any]:
         del job
+        # Do not let a maintenance job reuse a previous successful probe when
+        # this cycle fails before producing a new, persisted snapshot.
+        self._latest_probe = None
         result = await self._adapter.probe()
+        previous = await self._repository.get_snapshot("delivered")
         self._latest_probe = result
+        current_is_empty = False
+        for key in ("entries", "channels"):
+            current_entries = result.snapshot.get(key)
+            if isinstance(current_entries, list):
+                current_is_empty = not current_entries
+                break
+        previous_is_non_empty = False
+        if isinstance(previous, dict):
+            for key in ("entries", "channels"):
+                previous_entries = previous.get(key)
+                if isinstance(previous_entries, list) and previous_entries:
+                    previous_is_non_empty = True
+                    break
+        if (
+            current_is_empty
+            and previous_is_non_empty
+        ):
+            self._latest_probe = None
+            raise ServiceError(
+                "PROBE_EMPTY_RESULT",
+                "The upstream monitor returned no channels after a non-empty result",
+                retryable=True,
+            )
         if result.guardian_snapshot is not None and result.captured_at is not None:
             try:
                 guardian_payload = {
@@ -140,7 +167,12 @@ class SchedulerService:
                 )
             except Exception:
                 _LOGGER.exception("guardian_snapshot_publish_failed")
-        previous = await self._repository.get_snapshot("delivered")
+                self._latest_probe = None
+                raise ServiceError(
+                    "GUARDIAN_SNAPSHOT_PUBLISH_FAILED",
+                    "The Guardian snapshot could not be persisted",
+                    retryable=True,
+                ) from None
         changed = previous != result.snapshot
         if changed:
             await self._repository.set_snapshot("delivered", result.snapshot)
@@ -492,6 +524,7 @@ class SchedulerService:
                     status="queued" if queued else "skipped"
                 ).inc()
             except Exception:
+                _LOGGER.exception("scheduler_cycle_failed")
                 self._metrics.scheduler_runs.labels(status="error").inc()
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(

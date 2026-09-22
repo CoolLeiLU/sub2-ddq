@@ -53,7 +53,6 @@ from recovery import (
     parse_recovery_account_page,
     recovered_account_is_normal,
 )
-from video import VideoGenerationClient, normalize_video_api_url
 
 _LOGGER = logging.getLogger("sub2api_mcp")
 
@@ -86,13 +85,6 @@ class MonitorConfig:
     recovery_window_start: str = "02:00"
     recovery_window_end: str = "05:00"
     recovery_max_accounts_per_run: int = 5
-    video_enabled: bool = True
-    video_api_url: str = VideoGenerationClient.DEFAULT_ENDPOINT
-    video_length: int = VideoGenerationClient.DEFAULT_LENGTH
-    video_width: int = VideoGenerationClient.DEFAULT_WIDTH
-    video_height: int = VideoGenerationClient.DEFAULT_HEIGHT
-    video_steps: int = VideoGenerationClient.DEFAULT_STEPS
-    video_timeout_seconds: int = VideoGenerationClient.DEFAULT_TIMEOUT_SECONDS
 
     @classmethod
     def from_mapping(cls, values: dict[str, Any]) -> MonitorConfig:
@@ -119,10 +111,6 @@ class MonitorConfig:
             values.get("quiet_hours_start", "23:00"),
             values.get("quiet_hours_end", "08:00"),
         )
-        video_api_url = normalize_video_api_url(
-            values.get("video_api_url", VideoGenerationClient.DEFAULT_ENDPOINT)
-        )
-
         return cls(
             admin_key=admin_key,
             bot_uuid=bot_uuid,
@@ -164,38 +152,6 @@ class MonitorConfig:
                 5,
                 1,
                 20,
-            ),
-            video_enabled=values.get("video_enabled", True) is not False,
-            video_api_url=video_api_url,
-            video_length=_bounded_int(
-                values.get("video_length"),
-                VideoGenerationClient.DEFAULT_LENGTH,
-                1,
-                120,
-            ),
-            video_width=_bounded_int(
-                values.get("video_width"),
-                VideoGenerationClient.DEFAULT_WIDTH,
-                64,
-                2048,
-            ),
-            video_height=_bounded_int(
-                values.get("video_height"),
-                VideoGenerationClient.DEFAULT_HEIGHT,
-                64,
-                2048,
-            ),
-            video_steps=_bounded_int(
-                values.get("video_steps"),
-                VideoGenerationClient.DEFAULT_STEPS,
-                1,
-                100,
-            ),
-            video_timeout_seconds=_bounded_int(
-                values.get("video_timeout_seconds"),
-                VideoGenerationClient.DEFAULT_TIMEOUT_SECONDS,
-                10,
-                900,
             ),
         )
 
@@ -406,6 +362,7 @@ class Sub2APIClient:
         self,
         admin_key: str,
         *,
+        base_url: str = "https://zhisuanapi.cn/api/v1",
         opener: Callable[..., Any] | None = None,
         timeout_seconds: int = 10,
         now_provider: Callable[[], datetime] | None = None,
@@ -414,6 +371,25 @@ class Sub2APIClient:
         if not admin_key.strip():
             raise ValueError("Sub2API Admin Key is required")
         self._admin_key = admin_key.strip()
+        parsed_base = urllib_parse.urlsplit(base_url.strip().rstrip("/"))
+        if (
+            parsed_base.scheme != "https"
+            or not parsed_base.hostname
+            or parsed_base.username
+            or parsed_base.password
+            or parsed_base.query
+            or parsed_base.fragment
+        ):
+            raise ValueError("Sub2API base URL must be an absolute HTTPS URL")
+        normalized_base = base_url.strip().rstrip("/")
+        self.API_URL = f"{normalized_base}/admin/channel-monitors"
+        self.ADMIN_GROUPS_URL = f"{normalized_base}/admin/groups/all"
+        self.ADMIN_ACCOUNTS_URL = f"{normalized_base}/admin/accounts"
+        self.ADMIN_CHANNELS_URL = f"{normalized_base}/admin/channels"
+        self.ADMIN_USAGE_URL = f"{normalized_base}/admin/usage"
+        self.ADMIN_OPS_REQUESTS_URL = f"{normalized_base}/admin/ops/requests"
+        self.ADMIN_USERS_URL = f"{normalized_base}/admin/users"
+        self.ADMIN_USAGE_STATS_URL = f"{normalized_base}/admin/usage/stats"
         self._opener = opener or urllib_request.build_opener(
             _RejectRedirectHandler()
         ).open
@@ -874,20 +850,27 @@ class Sub2APIClient:
     ) -> tuple[list[ChannelProbe], list[AccountGroupState], list[GroupAccountCounts]]:
         channels = self.fetch_sync()
         groups, accounts = self.fetch_group_account_snapshot_sync()
+        allow_name_matching = True
         try:
             usage_records = self.fetch_probe_usage_records_sync(channels)
         except (MonitorDataError, MonitorRequestError) as exc:
             _LOGGER.warning(
-                "probe_group_binding_unavailable errorType=%s",
+                "probe_group_binding_unavailable errorType=%s; name matching disabled",
                 type(exc).__name__,
             )
             usage_records = []
+            # A transport or schema failure means the stable API-key-to-group
+            # evidence is unavailable.  Falling back to a display-name match
+            # here can attach a channel to the wrong account pool and make
+            # Guardian recover or quarantine unrelated accounts.
+            allow_name_matching = False
         bindings = resolve_channel_group_ids(channels, usage_records)
         return (
             build_channel_probes(
                 channels,
                 groups,
                 group_ids_by_monitor=bindings,
+                allow_name_matching=allow_name_matching,
             ),
             accounts,
             groups,

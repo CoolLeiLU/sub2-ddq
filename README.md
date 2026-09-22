@@ -5,8 +5,10 @@ the existing hardened channel/account clients and persists scheduling state,
 jobs, and Guardian events in SQLite. The service schedules directly; it does
 not depend on or push to any external messaging platform.
 
-This repository contains code and portable container artifacts only. No target
-server, domain, public port, or reverse proxy is assumed.
+This repository contains code and portable container artifacts only. The
+Sub2API admin endpoint is configured with `SUB2API_MCP_SUB2API_BASE_URL`; the
+default points to the current Sub2API deployment and can be replaced per
+environment.
 
 ## Capabilities
 
@@ -30,11 +32,10 @@ server, domain, public port, or reverse proxy is assumed.
   Sub2API account default instead of guessing. An explicit channel/group probe-model override is
   still honored. Manual pauses, expiry, and temporary unavailability are filtered before any test
   request.
-- Durable video jobs with user-selected length, steps, and resolution.
 - Signed platform-neutral actor bridge for bind, unbind, and account queries.
 - Scoped MCP API keys, audit records, structured logs, metrics, and health checks.
 - Guardian health scoring, group/channel overrides, minimum-pool protection,
-  fuse/recovery state, candidate weights, and a responsive management console.
+  fuse/recovery state, and a responsive management console.
 
 ## Guardian management console
 
@@ -50,11 +51,11 @@ overview, group scheduling, channel pool, account recovery, live routing, probe 
 scheduling guide, events, policy, connections, and information.
 
 Guardian has one direct scheduling switch and no observe/rollout mode. Start and emergency stop
-require confirmation, policy revision, and an idempotency key. When enabled, Guardian resolves a
-unique monitor→group→account mapping (stable API-key usage bindings take precedence over display
-names), applies bounded `load_factor` and baseline-relative
-`priority` changes one field at a time, then performs an independent exact read-back. Account
-`schedulable` changes remain tied to explicit conditional account tests.
+require confirmation, policy revision, and an idempotency key. When enabled, Guardian evaluates
+the latest shared monitor snapshot, persists the desired channel scheduling state, and runs only
+evidence-gated account recovery. Account `schedulable` changes remain tied to explicit conditional
+account tests with exact read-back. Channel API writeback is not part of this build, so the
+persisted desired state is the authoritative scheduling decision for an external writer.
 The policy page exposes the hourly health-check switch and interval. Its durable recovery ledger
 prevents repeat tests across the 15-second Guardian scan loop and across service restarts; routine
 successful checks are silent, while failures and state changes remain auditable through the
@@ -86,12 +87,11 @@ scope is isolated from administrator tools.
 ## Tools
 
 - Status/read: `sub2api_get_status`, `sub2api_probe_channels`,
-  `sub2api_get_job`, `sub2api_list_jobs`, `sub2api_get_bound_account`,
-  `sub2api_list_account_quarantines`.
+  `sub2api_get_bound_account`, `sub2api_list_account_quarantines`.
 - Scheduler/admin: `sub2api_set_scheduler_enabled`,
   `sub2api_submit_recovery`, `sub2api_submit_maintenance`.
 - Bindings: `sub2api_bind_account`, `sub2api_unbind_account`.
-- Video/jobs: `sub2api_submit_video`, `sub2api_cancel_job`.
+- Jobs: `sub2api_get_job`, `sub2api_list_jobs`, `sub2api_cancel_job`.
 - Guardian/read: `guardian_get_policy`, `guardian_get_status`,
   `guardian_get_recovery_status`, `guardian_get_overview`,
   `guardian_list_groups`, `guardian_list_channels`, `guardian_get_channel`,

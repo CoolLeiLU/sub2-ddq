@@ -58,6 +58,51 @@ _REASON_MAP = {
     "slow_first_token": AccountQuarantineReason.SLOW_FIRST_TOKEN,
 }
 
+
+def _monitor_observed_at(
+    value: str,
+    *,
+    captured_at: datetime,
+) -> datetime | None:
+    """Parse the upstream monitor's own observation timestamp.
+
+    The channel-monitor endpoint is cached by Sub2API and can legitimately be
+    older than the admin request that retrieves it.  Invalid or future values
+    fail the snapshot so they cannot move Guardian evidence into the future.
+    """
+
+    if not value:
+        raise ValueError("upstream monitor observation time is missing")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise ValueError("invalid upstream monitor observation time") from None
+    if parsed.tzinfo is None:
+        raise ValueError("upstream monitor observation time must be timezone-aware")
+    observed_at = parsed.astimezone(UTC)
+    if observed_at > captured_at:
+        raise ValueError("upstream monitor observation time is in the future")
+    return observed_at
+
+
+def _monitor_probe_is_fresh(
+    probe: ChannelProbe,
+    *,
+    now: datetime,
+    max_age_seconds: int,
+) -> bool:
+    try:
+        observed_at = _monitor_observed_at(
+            probe.channel.last_checked_at,
+            captured_at=now,
+        )
+    except ValueError:
+        return False
+    return (
+        observed_at is not None
+        and (now - observed_at).total_seconds() <= max_age_seconds
+    )
+
 BeforeQuarantine = Callable[[dict[str, object]], Awaitable[None]]
 AfterQuarantine = Callable[[str, bool, bool], Awaitable[None]]
 BeforeRestore = Callable[[str], Awaitable[None]]
@@ -109,22 +154,31 @@ class LegacySub2APIAdapter:
         client: Sub2APIClient,
         *,
         maintenance_policy: MaintenancePolicy | None = None,
+        probe_cache_ttl_seconds: int = 120,
+        probe_freshness_seconds: int = 180,
     ) -> None:
         self._client = client
         self._maintenance_policy = maintenance_policy or MaintenancePolicy()
+        self._probe_cache_ttl_seconds = max(30, int(probe_cache_ttl_seconds))
+        self._probe_freshness_seconds = max(30, int(probe_freshness_seconds))
         self._maintenance = MaintenanceServiceFactory.create(client, self._maintenance_policy)
         self._last_probes: list[ChannelProbe] = []
+        self._last_probe_captured_at: datetime | None = None
 
     async def probe(self) -> ProbeResult:
-        triggered_at = datetime.now(UTC)
         probes, accounts, groups = await self._client.fetch_probe_with_accounts()
+        # The timestamp is part of the shared-evidence contract.  Capture it
+        # after all upstream pages have been read so a slow or retried request
+        # cannot make fresh data look older than it actually is.
+        captured_at = datetime.now(UTC)
         self._last_probes = probes
+        self._last_probe_captured_at = captured_at
         snapshot = _SNAPSHOT_ADAPTER.validate_json(ProbeSnapshot.from_probes(probes).to_bytes())
         image_base64: str | None = None
         try:
             image_data_uri = render_status_report_image(
                 probes,
-                triggered_at=triggered_at,
+                triggered_at=captured_at,
             )
             prefix = "data:image/png;base64,"
             if image_data_uri.startswith(prefix):
@@ -133,9 +187,13 @@ class LegacySub2APIAdapter:
             image_base64 = None
         return ProbeResult(
             snapshot=snapshot,
-            report=format_status_report(probes, triggered_at=triggered_at),
+            report=format_status_report(probes, triggered_at=captured_at),
             image_base64=image_base64,
-            guardian_snapshot=self._build_guardian_snapshot(probes, groups),
+            guardian_snapshot=self._build_guardian_snapshot(
+                probes,
+                groups,
+                captured_at=captured_at,
+            ),
             account_observations=tuple(
                 AccountObservation(
                     account_id=account.account_id,
@@ -148,14 +206,16 @@ class LegacySub2APIAdapter:
                 )
                 for account in sorted(accounts, key=lambda item: int(item.account_id))
             ),
-            captured_at=triggered_at,
+            captured_at=captured_at,
         )
 
     async def guardian_snapshot(self) -> dict[str, Any]:
         """Return the richer, still-secret-free snapshot used by Guardian."""
         probes = await self._client.fetch_probe()
+        captured_at = datetime.now(UTC)
         self._last_probes = probes
-        return self._build_guardian_snapshot(probes)
+        self._last_probe_captured_at = captured_at
+        return self._build_guardian_snapshot(probes, captured_at=captured_at)
 
     async def _monitored_group_ids(self) -> frozenset[str]:
         probes = self._last_probes or await self._client.fetch_probe()
@@ -563,11 +623,18 @@ class LegacySub2APIAdapter:
     def _build_guardian_snapshot(
         probes: list[ChannelProbe],
         groups: list[GroupAccountCounts] | None = None,
+        *,
+        captured_at: datetime | None = None,
     ) -> dict[str, Any]:
         entries: list[dict[str, Any]] = []
         for probe in probes:
             channel = probe.channel
             accounts = probe.accounts
+            observed_at = (
+                _monitor_observed_at(channel.last_checked_at, captured_at=captured_at)
+                if captured_at is not None
+                else None
+            )
             entry: dict[str, Any] = {
                 "monitor_id": channel.monitor_id,
                 "name": channel.name,
@@ -585,6 +652,8 @@ class LegacySub2APIAdapter:
                 "latency_ms": channel.latency_ms,
                 "upstream_schedulable": channel.enabled,
             }
+            if observed_at is not None:
+                entry["observed_at"] = observed_at
             if channel.model:
                 entry["probe_model"] = channel.model
             if channel.api_mode:
@@ -621,13 +690,38 @@ class LegacySub2APIAdapter:
         before_quarantine: BeforeQuarantine | None = None,
         after_quarantine: AfterQuarantine | None = None,
     ) -> list[dict[str, object]]:
-        del probe
         if not (
             self._maintenance_policy.channel_account_sweep_enabled
             or self._maintenance_policy.log_account_guard_enabled
         ):
             return []
-        probes = self._last_probes or await self._client.fetch_probe()
+        now = datetime.now(UTC)
+        cached_at = self._last_probe_captured_at
+        cache_matches_probe = (
+            probe.captured_at is None
+            or cached_at is not None
+            and cached_at == probe.captured_at
+        )
+        cache_is_fresh = (
+            cached_at is not None
+            and (now - cached_at).total_seconds() <= self._probe_cache_ttl_seconds
+        )
+        if self._last_probes and cache_matches_probe and cache_is_fresh:
+            probes = self._last_probes
+        else:
+            probes = await self._client.fetch_probe()
+            self._last_probes = probes
+            now = datetime.now(UTC)
+            self._last_probe_captured_at = now
+        probes = [
+            item
+            for item in probes
+            if _monitor_probe_is_fresh(
+                item,
+                now=now,
+                max_age_seconds=self._probe_freshness_seconds,
+            )
+        ]
         observer = (
             _MaintenanceObserver(before_quarantine, after_quarantine)
             if before_quarantine is not None and after_quarantine is not None
@@ -637,7 +731,7 @@ class LegacySub2APIAdapter:
             raise ValueError("both quarantine callbacks are required")
         report = await self._maintenance.run(
             probes,
-            now=datetime.now(UTC),
+            now=now,
             excluded_account_ids=excluded_account_ids,
             observer=observer,
         )
@@ -861,6 +955,7 @@ def build_sub2api_adapter(settings: Settings) -> LegacySub2APIAdapter:
 
     client = Sub2APIClient(
         settings.sub2api_admin_key.get_secret_value(),
+        base_url=settings.sub2api_base_url,
         timeout_seconds=settings.sub2api_timeout_seconds,
     )
     policy = MaintenancePolicy(
@@ -875,4 +970,6 @@ def build_sub2api_adapter(settings: Settings) -> LegacySub2APIAdapter:
     return LegacySub2APIAdapter(
         client,
         maintenance_policy=policy,
+        probe_cache_ttl_seconds=max(30, settings.probe_interval_seconds * 2),
+        probe_freshness_seconds=max(180, settings.probe_interval_seconds * 3),
     )

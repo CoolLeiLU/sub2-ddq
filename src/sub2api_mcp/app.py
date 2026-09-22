@@ -18,7 +18,6 @@ from starlette.routing import Mount, Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .actor_bridge import ActorBridgeRequest, ActorRequestVerifier, ActorService
-from .adapters.video import LegacyVideoGenerator, VideoGenerator
 from .auth import ApiKeyAuthenticator, Principal, bind_principal
 from .bootstrap import bootstrap_legacy_core
 from .config import Settings
@@ -36,7 +35,7 @@ from .guardian.engine import GuardianEngine
 from .guardian.model_plaza import ModelPlazaOperations
 from .guardian.repository import GuardianRepository
 from .guardian.service import GuardianService
-from .jobs import JobManager, VideoJobService
+from .jobs import JobManager
 from .logging import configure_logging
 from .metrics import Metrics
 from .repository import SqliteRepository
@@ -82,7 +81,6 @@ class Runtime:
     authenticator: ApiKeyAuthenticator
     operations: RuntimeOperations
     scheduler: SchedulerService
-    video: VideoJobService
     jobs: JobManager
     service: Sub2APIService
     mcp: Sub2APIMCPServer
@@ -97,17 +95,13 @@ def build_runtime(
     settings: Settings,
     *,
     operations: RuntimeOperations | None = None,
-    video_generator: VideoGenerator | None = None,
 ) -> Runtime:
-    if operations is None or video_generator is None:
+    if operations is None:
         bootstrap_legacy_core(settings.legacy_core_root)
     if operations is None:
         from .adapters.sub2api import build_sub2api_adapter
 
         operations = build_sub2api_adapter(settings)
-    if video_generator is None:
-        video_generator = LegacyVideoGenerator(settings.video_api_url)
-
     repository = SqliteRepository(settings.database_path)
     guardian_repository = GuardianRepository(settings.database_path)
     metrics = Metrics.create()
@@ -121,12 +115,6 @@ def build_runtime(
         ),
     )
     scheduler = SchedulerService(repository, operations, metrics, scheduler_policy)
-    video = VideoJobService(
-        repository,
-        video_generator,
-        max_pending=settings.video_max_pending,
-    )
-
     guardian = GuardianService(
         guardian_repository,
         GuardianEngine(
@@ -142,12 +130,9 @@ def build_runtime(
         repository=repository,
         operations=operations,
         scheduler=scheduler,
-        video=video,
-        video_enabled=settings.video_enabled,
         recovery_owner=guardian,
     )
     jobs = JobManager(repository, metrics)
-    jobs.register(JobType.VIDEO, video.handle)
     jobs.register(JobType.PROBE, scheduler.handle_probe)
     jobs.register(JobType.RECOVERY, guardian.handle_recovery)
     jobs.register(JobType.MAINTENANCE, scheduler.handle_maintenance)
@@ -180,7 +165,6 @@ def build_runtime(
         authenticator=authenticator,
         operations=operations,
         scheduler=scheduler,
-        video=video,
         jobs=jobs,
         service=service,
         mcp=mcp,
@@ -322,7 +306,7 @@ def create_app(runtime: Runtime) -> ASGIApp:
         await runtime.guardian_repository.initialize()
         session_manager = runtime.mcp.session_manager.run()
         await session_manager.__aenter__()
-        await runtime.jobs.start(video_workers=runtime.settings.video_concurrency)
+        await runtime.jobs.start()
         await runtime.scheduler.start()
         await runtime.guardian.start()
         runtime.started = True

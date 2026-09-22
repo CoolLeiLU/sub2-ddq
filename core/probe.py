@@ -57,7 +57,21 @@ def _optional_number(value: Any, field: str, number_type: type[int | float]):
         return None
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise MonitorDataError(f"invalid {field}")
-    return number_type(value)
+    if number_type is int and isinstance(value, float) and not value.is_integer():
+        raise MonitorDataError(f"invalid {field}")
+    try:
+        converted = number_type(value)
+    except (OverflowError, ValueError) as exc:
+        raise MonitorDataError(f"invalid {field}") from exc
+    if isinstance(converted, float) and not math.isfinite(converted):
+        raise MonitorDataError(f"invalid {field}")
+    if converted < 0:
+        raise MonitorDataError(f"invalid {field}")
+    if field == "availability_7d" and converted > 100:
+        raise MonitorDataError(f"invalid {field}")
+    if field == "primary_latency_ms" and converted > 3_600_000:
+        raise MonitorDataError(f"invalid {field}")
+    return converted
 
 
 def _non_negative_int(value: Any, field: str, *, default: int | None = None) -> int:
@@ -559,6 +573,7 @@ def parse_account_group_state_page(
         or page > pages
         or len(data["items"]) > page_size
         or len(data["items"]) > total
+        or len(data["items"]) != total - page_size * (page - 1)
     ):
         raise MonitorDataError("invalid account snapshot pagination")
 
@@ -686,6 +701,7 @@ def build_channel_probes(
     groups: Iterable[GroupAccountCounts],
     *,
     group_ids_by_monitor: Mapping[str, str] | None = None,
+    allow_name_matching: bool = True,
 ) -> list[ChannelProbe]:
     group_list = list(groups)
     group_by_id = {group.group_id: group for group in group_list}
@@ -702,8 +718,6 @@ def build_channel_probes(
 
     probes: list[ChannelProbe] = []
     for channel in channels:
-        if not channel.enabled:
-            continue
         resolved_group_id = (group_ids_by_monitor or {}).get(channel.monitor_id)
         if resolved_group_id is not None:
             probes.append(
@@ -712,6 +726,9 @@ def build_channel_probes(
                     accounts=group_by_id.get(resolved_group_id),
                 )
             )
+            continue
+        if not allow_name_matching:
+            probes.append(ChannelProbe(channel=channel, accounts=None))
             continue
         accounts = None
         candidates: list[str] = []
@@ -813,6 +830,7 @@ def parse_channel_monitor_page(
         or page > pages
         or len(channels) > page_size
         or len(channels) > total
+        or len(channels) != total - page_size * (page - 1)
     ):
         raise MonitorDataError("invalid channel monitor pagination")
     return channels, pages, page_size
@@ -836,7 +854,7 @@ def format_status_report(
     probe_list = list(probes)
     trigger_line = format_trigger_time(triggered_at)
     if not probe_list:
-        return f"📊 渠道监控\n{trigger_line}\n暂无启用的渠道探测结果。"
+        return f"📊 渠道监控\n{trigger_line}\n暂无渠道探测结果。"
 
     status_labels = {
         "operational": ("✅", "正常"),
@@ -848,10 +866,12 @@ def format_status_report(
     normal_count = sum(
         probe.channel.status == "operational" for probe in probe_list
     )
+    enabled_count = sum(probe.channel.enabled for probe in probe_list)
     blocks = [
         (
             f"📊 渠道监控｜共 {len(probe_list)} 个｜正常 {normal_count}｜"
-            f"异常 {len(probe_list) - normal_count}\n"
+            f"异常 {len(probe_list) - normal_count}｜已启用 {enabled_count}｜"
+            f"已禁用 {len(probe_list) - enabled_count}\n"
             f"{trigger_line}"
         )
     ]
@@ -864,6 +884,7 @@ def format_status_report(
             else f"{channel.availability_7d:.1f}%"
         )
         icon, status_label = status_labels.get(channel.status, ("❔", "未知"))
+        schedule_label = "已启用" if channel.enabled else "已禁用"
         if probe.accounts is None:
             group_line = "分组：未关联账号组"
             account_line = "账号：暂无可核对的分组数据"
@@ -877,6 +898,7 @@ def format_status_report(
         blocks.append(
             f"{icon} {channel.name}\n"
             f"状态：{status_label}｜延迟：{latency}｜7日可用率：{availability}\n"
+            f"调度：{schedule_label}\n"
             f"探测：{channel.provider or '--'}｜{channel.model or '--'}\n"
             f"{group_line}\n"
             f"{account_line}"

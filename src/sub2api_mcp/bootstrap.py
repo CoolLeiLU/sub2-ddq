@@ -14,7 +14,6 @@ REQUIRED_CORE_FILES = (
     "notification_image.py",
     "probe.py",
     "recovery.py",
-    "video.py",
 )
 
 

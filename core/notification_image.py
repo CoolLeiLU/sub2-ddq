@@ -126,7 +126,7 @@ def _status_row(probe: ChannelProbe) -> _StatusRow:
             str(accounts.closed_count),
         )
     return _StatusRow(
-        name=channel.name,
+        name=("已禁用｜" if not channel.enabled else "") + channel.name,
         latency="--" if channel.latency_ms is None else f"{channel.latency_ms}ms",
         available=counts[0],
         error=counts[1],
@@ -237,7 +237,7 @@ def _render_report(
 
     if not rows:
         draw.rectangle((x0, y, x1, y + row_height), fill=(248, 250, 252))
-        _draw_cell_text(draw, "暂无启用的渠道探测结果", x0, x1, y, row_height, body_font, (71, 85, 105))
+        _draw_cell_text(draw, "暂无渠道探测结果", x0, x1, y, row_height, body_font, (71, 85, 105))
         y += row_height
     else:
         for index, row in enumerate(rows):

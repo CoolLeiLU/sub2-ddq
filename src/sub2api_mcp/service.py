@@ -12,10 +12,8 @@ from .contracts import (
     JobStatus,
     JobType,
     ProbeResult,
-    SubmitVideoInput,
 )
 from .errors import ServiceError
-from .jobs import VideoJobService
 from .repository import SqliteRepository
 from .scheduler import SchedulerService
 
@@ -39,15 +37,11 @@ class Sub2APIService:
         repository: SqliteRepository,
         operations: ServiceOperations,
         scheduler: SchedulerService,
-        video: VideoJobService,
-        video_enabled: bool = True,
         recovery_owner: RecoveryJobOwner | None = None,
     ) -> None:
         self.repository = repository
         self._operations = operations
         self._scheduler = scheduler
-        self._video = video
-        self._video_enabled = video_enabled
         self._recovery_owner = recovery_owner
 
     async def get_status(self) -> dict[str, Any]:
@@ -164,12 +158,6 @@ class Sub2APIService:
     async def unbind_account(self, actor_key: str) -> dict[str, bool]:
         await self.repository.unbind_actor(self._validate_actor_key(actor_key))
         return {"unbound": True}
-
-    async def submit_video(self, request: SubmitVideoInput) -> dict[str, Any]:
-        if not self._video_enabled:
-            raise ServiceError("VIDEO_DISABLED", "Video generation is disabled")
-        submission = await self._video.submit(request)
-        return submission.model_dump(mode="json")
 
     async def cancel_job(self, job_id: str) -> dict[str, Any]:
         return (await self.repository.cancel_job(job_id)).model_dump(mode="json")

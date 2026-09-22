@@ -309,6 +309,15 @@ class GuardianEngine:
                 }
             existing = await self.repository.get_channel(entry.monitor_id)
             existing_details = cast(dict[str, Any], existing["details"] if existing else {})
+            if entry.observed_at is None:
+                entry_observed_at = captured_at
+                entry_is_fresh = True
+            else:
+                entry_observed_at = entry.observed_at
+                entry_is_fresh = (
+                    now - entry_observed_at
+                    <= timedelta(seconds=policy.sampling.fresh_seconds)
+                )
             if snapshot_id is not None and captured_at is not None:
                 account_recovery_active = (
                     policy.enabled
@@ -317,6 +326,7 @@ class GuardianEngine:
                 )
                 if (
                     account_recovery_active
+                    and entry_is_fresh
                     and entry.status in {"failed", "error"}
                     and entry.group_id is not None
                 ):
@@ -345,7 +355,7 @@ class GuardianEngine:
                             channel_id=entry.monitor_id,
                             group_id=entry.group_id,
                             snapshot_id=snapshot_id,
-                            opened_at=captured_at,
+                            opened_at=entry_observed_at or now,
                         )
                         trigger_target = (episode.channel_id, entry.group_id)
                         if trigger_target not in seen_channel_triggers:
@@ -357,10 +367,10 @@ class GuardianEngine:
                                     "group_id": entry.group_id,
                                 }
                             )
-                else:
+                elif entry_is_fresh:
                     await self.repository.close_channel_error_episode(
                         entry.monitor_id,
-                        closed_at=captured_at,
+                        closed_at=entry_observed_at or now,
                     )
             manual_control = ManualControl(
                 existing["manual_control"] if existing else ManualControl.NONE.value
@@ -389,19 +399,29 @@ class GuardianEngine:
             )
             if should_monitor:
                 if snapshot_id is not None and captured_at is not None:
-                    bucket_timestamp = int(captured_at.timestamp())
+                    evidence_at = entry_observed_at or captured_at
+                    bucket_timestamp = int(evidence_at.timestamp())
                     bucket_at = datetime.fromtimestamp(
                         bucket_timestamp - bucket_timestamp % policy.sampling.bucket_seconds,
                         tz=UTC,
                     )
                     inserted = await self.repository.append_evidence(
                         GuardianEvidence(
-                            source_event_id=f"{snapshot_id}:{entry.monitor_id}",
+                            # The upstream monitor may be read once per minute
+                            # while its own check runs every 20–60 minutes.
+                            # Deduplicate repeated reads of the same upstream
+                            # observation instead of counting them as fresh
+                            # evidence on every scheduler cycle.
+                            source_event_id=(
+                                f"monitor:{entry.monitor_id}:{evidence_at.isoformat()}"
+                                if entry.observed_at is not None
+                                else f"{snapshot_id}:{entry.monitor_id}"
+                            ),
                             channel_id=entry.monitor_id,
                             source=GuardianSampleSource.SHARED_MONITOR,
                             event_type=event_type,
                             score=policy.scoring.event_scores[event_type],
-                            occurred_at=captured_at,
+                            occurred_at=evidence_at,
                             reliability=0.85,
                             ttfb_ms=entry.latency_ms,
                             message=entry.status,

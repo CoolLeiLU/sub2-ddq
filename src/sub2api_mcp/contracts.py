@@ -6,7 +6,6 @@ import re
 from datetime import datetime
 from enum import StrEnum
 from typing import Any
-from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -19,6 +18,8 @@ class JobType(StrEnum):
     PROBE = "PROBE"
     RECOVERY = "RECOVERY"
     MAINTENANCE = "MAINTENANCE"
+    # Retained only so historical rows remain readable after video generation
+    # was removed from the runtime.
     VIDEO = "VIDEO"
 
 
@@ -257,48 +258,6 @@ class MaintenanceOutcome(StrictModel):
 
 class MaintenanceOutcomeBatch(StrictModel):
     items: list[MaintenanceOutcome] = Field(max_length=2000)
-
-
-class SubmitVideoInput(StrictModel):
-    prompt: str = Field(min_length=1, max_length=2000)
-    length: int = Field(default=22, ge=1, le=3600)
-    steps: int = Field(default=20, ge=1, le=100)
-    width: int = Field(default=768, ge=64, le=2048)
-    height: int = Field(default=448, ge=64, le=2048)
-
-    @field_validator("prompt")
-    @classmethod
-    def normalize_prompt(cls, value: str) -> str:
-        normalized = value.strip()
-        if not normalized:
-            raise ValueError("video prompt is required")
-        if any(ord(character) < 32 and character not in "\n\r\t" for character in normalized):
-            raise ValueError("video prompt contains invalid control characters")
-        return normalized
-
-
-class VideoOutput(StrictModel):
-    url: str = Field(min_length=1, max_length=2048)
-    filename: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-
-    @field_validator("url")
-    @classmethod
-    def validate_video_url(cls, value: str) -> str:
-        parsed = urlsplit(value)
-        if (
-            parsed.scheme != "https"
-            or not parsed.hostname
-            or parsed.username is not None
-            or parsed.password is not None
-            or not parsed.path.casefold().endswith(".mp4")
-        ):
-            raise ValueError("video output must be an absolute HTTPS MP4 URL")
-        return value
-
-
-class VideoSubmission(StrictModel):
-    job: JobRecord
-    queue_count: int = Field(ge=1)
 
 
 class AccountObservationStatus(StrEnum):

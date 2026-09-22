@@ -68,6 +68,7 @@ class Settings(BaseSettings):
 
     access_tokens: list[AccessTokenConfig] = Field(min_length=1)
     sub2api_admin_key: SecretStr = Field(min_length=16, max_length=2048)
+    sub2api_base_url: str = "https://zhisuanapi.cn/api/v1"
     sub2api_timeout_seconds: int = Field(default=10, ge=1, le=30)
 
     scheduler_enabled: bool = False
@@ -88,15 +89,6 @@ class Settings(BaseSettings):
     slow_first_token_event_threshold: int = Field(default=3, ge=3, le=3)
     slow_first_token_ms: int = Field(default=30000, ge=1, le=600000)
     slow_first_token_window_minutes: int = Field(default=3, ge=3, le=3)
-
-    video_enabled: bool = False
-    video_api_url: str = "https://h3.fzypod.com:9090/v1/video/generations"
-    video_length: int = Field(default=22, ge=1, le=3600)
-    video_width: int = Field(default=768, ge=64, le=2048)
-    video_height: int = Field(default=448, ge=64, le=2048)
-    video_steps: int = Field(default=20, ge=1, le=100)
-    video_max_pending: int = Field(default=20, ge=1, le=100)
-    video_concurrency: int = Field(default=2, ge=1, le=8)
 
     actor_bridge_enabled: bool = False
     actor_bridge_secret: SecretStr | None = None
@@ -123,12 +115,12 @@ class Settings(BaseSettings):
         if len(token_values) != len(set(token_values)):
             raise ValueError("access token values must be unique")
 
-        video_url = urlsplit(self.video_api_url.strip().rstrip("/"))
-        if video_url.scheme != "https" or not video_url.hostname:
-            raise ValueError("video_api_url must be an absolute HTTPS URL")
-        if video_url.username or video_url.password or video_url.query or video_url.fragment:
-            raise ValueError("video_api_url cannot contain credentials, query, or fragment")
-        self.video_api_url = self.video_api_url.strip().rstrip("/")
+        base_url = urlsplit(self.sub2api_base_url.strip().rstrip("/"))
+        if base_url.scheme != "https" or not base_url.hostname:
+            raise ValueError("sub2api_base_url must be an absolute HTTPS URL")
+        if base_url.username or base_url.password or base_url.query or base_url.fragment:
+            raise ValueError("sub2api_base_url cannot contain credentials, query, or fragment")
+        self.sub2api_base_url = self.sub2api_base_url.strip().rstrip("/")
 
         if self.actor_bridge_enabled and (
             self.actor_bridge_secret is None

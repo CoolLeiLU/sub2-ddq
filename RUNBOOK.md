@@ -14,8 +14,7 @@ workers, and the scheduler have started.
 
 ## Queue growth
 
-- Video queue: verify the upstream video endpoint is reachable and has not returned an explicit error.
-- Control queue: verify the fixed Sub2API admin endpoints and Admin Key.
+- Control queue: verify `SUB2API_MCP_SUB2API_BASE_URL` and the Admin Key.
 
 ## Database retention
 
@@ -67,7 +66,7 @@ workers, and the scheduler have started.
 
 ## Safe recovery
 
-- Restarting marks `RUNNING` jobs `INTERRUPTED`; non-resumable video jobs are not duplicated.
+- Restarting marks `RUNNING` jobs `INTERRUPTED`; jobs are never resumed implicitly.
 - SQLite data is under the configured data path or `/data` volume.
 - Never delete the database while a worker is running.
 - Before rollback, stop the service and back up the database plus the current image/tag.

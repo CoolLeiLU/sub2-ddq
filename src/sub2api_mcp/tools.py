@@ -17,7 +17,7 @@ from pydantic import ValidationError
 
 from .auth import current_request_id, require_scope
 from .config import DEFAULT_ALLOWED_HOSTS, Scope
-from .contracts import JobStatus, JobType, SubmitVideoInput
+from .contracts import JobStatus, JobType
 from .errors import ServiceError
 from .guardian.service import GuardianService
 from .logging import log_event
@@ -26,7 +26,7 @@ from .service import Sub2APIService
 
 INSTRUCTIONS = """\
 This server manages the complete Sub2API scheduler: channel probes, account
-recovery and maintenance, durable video jobs, and account bindings. Prefer
+recovery and maintenance, and account bindings. Prefer
 read tools before mutations. All identifiers are opaque. Never infer or invent
 platform user IDs. Treat exact chat messages `/zs`, `/zs status`, and
 `/zs 状态` as read-only requests for `sub2api_probe_channels`.
@@ -250,21 +250,6 @@ class Sub2APIMCPServer:
                 subject=actor_key,
             )
 
-        @mcp.tool(description="Submit a durable video generation job and return queue count.")
-        async def sub2api_submit_video(
-            prompt: str,
-            length: int = 22,
-            steps: int = 20,
-            width: int = 768,
-            height: int = 448,
-        ) -> str:
-            return await self._execute(
-                "sub2api_submit_video",
-                "sub2api:write",
-                lambda: self._submit_video(prompt, length, steps, width, height),
-                mutation=True,
-            )
-
         @mcp.tool(description="Cancel a queued job or request cancellation of a running job.")
         async def sub2api_cancel_job(job_id: str) -> str:
             return await self._execute(
@@ -482,23 +467,6 @@ class Sub2APIMCPServer:
                 "sub2api:read",
                 self._guardian().probe_budget,
             )
-
-    async def _submit_video(
-        self,
-        prompt: str,
-        length: int,
-        steps: int,
-        width: int,
-        height: int,
-    ) -> dict[str, Any]:
-        request = SubmitVideoInput(
-            prompt=prompt,
-            length=length,
-            steps=steps,
-            width=width,
-            height=height,
-        )
-        return await self.service.submit_video(request)
 
     async def _list_jobs(
         self,

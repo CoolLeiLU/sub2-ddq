@@ -9,48 +9,13 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from .adapters.video import VideoGenerator
-from .contracts import (
-    JobRecord,
-    JobType,
-    SubmitVideoInput,
-    VideoSubmission,
-)
+from .contracts import JobRecord, JobType
 from .errors import ServiceError
 from .logging import log_event
 from .metrics import Metrics
 from .repository import SqliteRepository
 
 JobHandler = Callable[[JobRecord], Awaitable[dict[str, Any]]]
-
-
-class VideoJobService:
-    def __init__(
-        self,
-        repository: SqliteRepository,
-        generator: VideoGenerator,
-        *,
-        max_pending: int,
-    ) -> None:
-        self._repository = repository
-        self._generator = generator
-        self._max_pending = max_pending
-
-    async def submit(self, request: SubmitVideoInput) -> VideoSubmission:
-        created = await self._repository.create_job_with_capacity(
-            JobType.VIDEO,
-            request.model_dump(mode="json"),
-            max_active=self._max_pending,
-        )
-        if created is None:
-            raise ServiceError("VIDEO_QUEUE_FULL", "The video generation queue is full")
-        job, queue_count = created
-        return VideoSubmission(job=job, queue_count=queue_count)
-
-    async def handle(self, job: JobRecord) -> dict[str, Any]:
-        request = SubmitVideoInput.model_validate(job.payload)
-        output = await self._generator.generate(request)
-        return output.model_dump(mode="json")
 
 
 class JobManager:
@@ -113,10 +78,8 @@ class JobManager:
         )
         return True
 
-    async def start(self, *, video_workers: int = 2, control_workers: int = 1) -> None:
+    async def start(self, *, control_workers: int = 1) -> None:
         self._stop.clear()
-        for _ in range(video_workers):
-            self._spawn_worker({JobType.VIDEO}, "video")
         control_types = {JobType.PROBE, JobType.RECOVERY, JobType.MAINTENANCE}
         for _ in range(control_workers):
             self._spawn_worker(control_types, "control")
@@ -128,8 +91,25 @@ class JobManager:
         task.add_done_callback(self._tasks.discard)
 
     async def _worker_loop(self, job_types: set[JobType], worker_id: str) -> None:
+        retry_delay = 0.25
         while not self._stop.is_set():
-            handled = await self.run_once(job_types, worker_id)
+            try:
+                handled = await self.run_once(job_types, worker_id)
+                retry_delay = 0.25
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # A transient SQLite or upstream error must not silently kill the
+                # only control worker.  Keep the worker alive and back off so a
+                # locked database does not become a tight retry loop.
+                self._logger.exception(
+                    "job_worker_iteration_failed",
+                    extra={"workerId": worker_id},
+                )
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(self._stop.wait(), timeout=retry_delay)
+                retry_delay = min(retry_delay * 2, 10.0)
+                continue
             if not handled:
                 with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(self._stop.wait(), timeout=0.25)

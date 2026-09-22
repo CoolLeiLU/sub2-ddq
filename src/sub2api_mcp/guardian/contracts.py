@@ -689,6 +689,10 @@ class UpstreamProbeEntry(StrictModel):
     monitor_id: str = Field(min_length=1, max_length=128)
     name: str = Field(min_length=1, max_length=200)
     status: str = Field(pattern=r"^(operational|degraded|failed|error|unknown)$")
+    # The monitor endpoint is itself a cached view.  Keep the upstream check
+    # time so shared sampling does not treat a many-minute-old result as a new
+    # observation merely because the admin API was read just now.
+    observed_at: datetime | None = None
     group_id: str | None = Field(default=None, max_length=128)
     group_name: str | None = Field(default=None, max_length=200)
     available_count: int | None = Field(default=None, ge=0)
@@ -722,6 +726,8 @@ class UpstreamProbeEntry(StrictModel):
 
     @model_validator(mode="after")
     def validate_group_counts(self) -> UpstreamProbeEntry:
+        if self.observed_at is not None and self.observed_at.tzinfo is None:
+            raise ValueError("upstream observed_at must be timezone-aware")
         counts = (
             self.available_count,
             self.error_count,
