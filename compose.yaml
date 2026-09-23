@@ -12,12 +12,13 @@ services:
     environment:
       SUB2API_MCP_HOST: 0.0.0.0
       SUB2API_MCP_PORT: 5310
-      SUB2API_MCP_DATABASE_PATH: /data/sub2api-mcp.db
+      SUB2API_MCP_DATABASE_URL: postgresql://guardian:${POSTGRES_PASSWORD:?}@postgres:5432/guardian
       SUB2API_MCP_LEGACY_CORE_ROOT: /opt/sub2api-core
     ports:
       - "127.0.0.1:${SUB2API_MCP_PUBLISH_PORT:-5310}:5310"
-    volumes:
-      - sub2api_mcp_data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
     read_only: true
     tmpfs:
       - /tmp:size=32m,noexec,nosuid,nodev
@@ -29,5 +30,27 @@ services:
     mem_limit: 512m
     cpus: 1.0
 
+  postgres:
+    image: postgres:16-alpine
+    container_name: sub2api-scheduler-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: guardian
+      POSTGRES_DB: guardian
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+    volumes:
+      - sub2api_mcp_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U guardian -d guardian"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 200
+    mem_limit: 512m
+    cpus: 1.0
+
 volumes:
-  sub2api_mcp_data:
+  sub2api_mcp_pg:

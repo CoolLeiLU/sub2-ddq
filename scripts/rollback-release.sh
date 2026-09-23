@@ -27,20 +27,14 @@ if [[ ${expected_previous} != "${release_sha}" ]]; then
     exit 5
 fi
 
-data_volume=bot-mcp_sub2api_mcp_data
-backup_file=/data/predeploy-${current_sha}.db
-current_image=$(docker inspect --format '{{.Config.Image}}' sub2api-scheduler-mcp 2>/dev/null || true)
-if [[ -z ${current_image} ]]; then
-    echo "current container image is unavailable" >&2
+backup_file=/opt/bot-mcp/backups/predeploy-${current_sha}.sql
+if [[ ! -s ${backup_file} ]]; then
+    echo "no pre-deploy database dump for ${current_sha} is available" >&2
     exit 6
 fi
 docker stop sub2api-scheduler-mcp >/dev/null || true
-if ! docker run --rm \
-    --volume "${data_volume}:/data" \
-    --entrypoint /opt/sub2api-mcp/venv/bin/python \
-    "${current_image}" \
-    -c 'import os,sqlite3,sys; src=sys.argv[1]; dst=sys.argv[2]; assert os.path.isfile(src), src; [os.remove(dst+s) for s in ("-wal","-shm") if os.path.exists(dst+s)]; backup=sqlite3.connect(src); target=sqlite3.connect(dst); backup.backup(target); target.close(); backup.close()' \
-    "${backup_file}" /data/sub2api-mcp.db; then
+if ! docker exec -i sub2api-scheduler-postgres \
+    psql -v ON_ERROR_STOP=1 -U guardian -d guardian < "${backup_file}" >/dev/null 2>&1; then
     echo "database restore failed; rollback aborted" >&2
     exit 7
 fi

@@ -57,19 +57,19 @@ if [[ -n ${previous_release} ]]; then
     printf '%s\n' "${previous_sha}" > "${release_dir}/previous-sha"
 fi
 
-data_volume=bot-mcp_sub2api_mcp_data
-backup_file=/data/predeploy-${release_sha}.db
+# The service now stores state in PostgreSQL.  A pre-deploy dump is taken with
+# pg_dump against the running container so a rollback can restore the data.
+backup_dir=/opt/bot-mcp/backups
+backup_file=${backup_dir}/predeploy-${release_sha}.sql
 backup_created=false
-current_image=$(docker inspect --format '{{.Config.Image}}' sub2api-scheduler-mcp 2>/dev/null || true)
-if [[ -n ${current_image} ]]; then
-    docker volume inspect "${data_volume}" >/dev/null
-    docker run --rm \
-        --volume "${data_volume}:/data" \
-        --entrypoint /opt/sub2api-mcp/venv/bin/python \
-        "${current_image}" \
-        -c 'import os,sqlite3,sys; src=sys.argv[1]; dst=sys.argv[2]; assert os.path.isfile(src), src; os.path.exists(dst) and os.remove(dst); source=sqlite3.connect(src); backup=sqlite3.connect(dst); source.backup(backup); backup.close(); source.close()' \
-        /data/sub2api-mcp.db "${backup_file}"
-    backup_created=true
+if docker inspect sub2api-scheduler-postgres >/dev/null 2>&1; then
+    install -d -m 700 "${backup_dir}"
+    if docker exec sub2api-scheduler-postgres \
+        pg_dump --clean --if-exists -U guardian -d guardian > "${backup_file}"; then
+        [[ -s ${backup_file} ]] && backup_created=true
+    else
+        rm -f "${backup_file}"
+    fi
 fi
 
 compose() {
@@ -86,12 +86,8 @@ rollback() {
     if [[ -n ${previous_release} && -d ${previous_release} && -f ${previous_release}/.release.env ]]; then
         compose stop || true
         if [[ ${backup_created} == true ]]; then
-            if ! docker run --rm \
-                --volume "${data_volume}:/data" \
-                --entrypoint /opt/sub2api-mcp/venv/bin/python \
-                "${current_image}" \
-                -c 'import os,sqlite3,sys; src=sys.argv[1]; dst=sys.argv[2]; assert os.path.isfile(src), src; [os.remove(dst+s) for s in ("-wal","-shm") if os.path.exists(dst+s)]; backup=sqlite3.connect(src); target=sqlite3.connect(dst); backup.backup(target); target.close(); backup.close()' \
-                "${backup_file}" /data/sub2api-mcp.db; then
+            if ! docker exec -i sub2api-scheduler-postgres \
+                psql -v ON_ERROR_STOP=1 -U guardian -d guardian < "${backup_file}" >/dev/null 2>&1; then
                 echo "database restore failed; previous release was not restarted" >&2
                 return
             fi
@@ -133,15 +129,12 @@ ln -sfn -- "${release_dir}" "${temporary_link}"
 mv -Tf -- "${temporary_link}" "${base_dir}/current"
 printf '%s\n' "${release_sha}" > "${base_dir}/deployed-sha"
 
-guardian_state=$(compose exec -T sub2api-mcp \
-    /opt/sub2api-mcp/venv/bin/python -c \
-    'import json,sqlite3; db=sqlite3.connect("/data/sub2api-mcp.db"); policy=db.execute("SELECT policy_json,revision FROM guardian_policy WHERE singleton=1").fetchone(); schema=db.execute("SELECT value FROM guardian_metadata WHERE key=\"schema_version\"").fetchone(); data=json.loads(policy[0]); print("guardian_enabled={} policy_revision={} schema_version={}".format(str(bool(data.get("enabled"))).lower(),policy[1],schema[0]))')
+guardian_state=$(docker exec sub2api-scheduler-postgres psql -tA -U guardian -d guardian \
+    -c "SELECT 'guardian_enabled=' || (policy_json::jsonb ->> 'enabled') || ' policy_revision=' || revision || ' schema_version=' || (SELECT value FROM guardian_metadata WHERE key='schema_version') FROM guardian_policy WHERE singleton=1" \
+    | head -1)
 echo "${guardian_state}"
 if [[ ${backup_created} == true ]]; then
-    compose exec -T sub2api-mcp \
-        /opt/sub2api-mcp/venv/bin/python -c \
-        'import os,sys; path=sys.argv[1]; assert os.path.isfile(path) and os.path.getsize(path)>0, path' \
-        "${backup_file}"
+    [[ -s ${backup_file} ]] || { echo "database backup is empty" >&2; exit 6; }
     echo "database_backup=${backup_file}"
 fi
 

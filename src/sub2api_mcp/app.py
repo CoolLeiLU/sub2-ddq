@@ -28,6 +28,7 @@ from .contracts import (
     ProbeResult,
     QuarantineProbeAttempt,
 )
+from .db import Database
 from .errors import ServiceError
 from .guardian.account_recovery import AccountRecoveryOperations
 from .guardian.api import GuardianAPI
@@ -76,6 +77,7 @@ class RuntimeOperations(ServiceOperations, Protocol):
 @dataclass(slots=True)
 class Runtime:
     settings: Settings
+    database: Database
     repository: SqliteRepository
     metrics: Metrics
     authenticator: ApiKeyAuthenticator
@@ -102,8 +104,9 @@ def build_runtime(
         from .adapters.sub2api import build_sub2api_adapter
 
         operations = build_sub2api_adapter(settings)
-    repository = SqliteRepository(settings.database_path)
-    guardian_repository = GuardianRepository(settings.database_path)
+    database = Database(settings.database_url)
+    repository = SqliteRepository(database)
+    guardian_repository = GuardianRepository(database)
     metrics = Metrics.create()
     authenticator = ApiKeyAuthenticator(settings.access_tokens)
     scheduler_policy = SchedulerPolicy(
@@ -159,6 +162,7 @@ def build_runtime(
         )
 
     return Runtime(
+        database=database,
         settings=settings,
         repository=repository,
         metrics=metrics,
@@ -302,6 +306,7 @@ def create_app(runtime: Runtime) -> ASGIApp:
 
     @asynccontextmanager
     async def lifespan(_: Starlette):
+        await runtime.database.connect()
         await runtime.repository.initialize()
         await runtime.guardian_repository.initialize()
         session_manager = runtime.mcp.session_manager.run()
@@ -315,6 +320,7 @@ def create_app(runtime: Runtime) -> ASGIApp:
         finally:
             runtime.started = False
             await runtime.guardian.stop()
+            await runtime.database.close()
             await runtime.scheduler.stop()
             await runtime.jobs.stop()
             await session_manager.__aexit__(None, None, None)

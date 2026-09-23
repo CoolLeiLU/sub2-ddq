@@ -63,7 +63,11 @@ class Settings(BaseSettings):
         default_factory=lambda: list(DEFAULT_ALLOWED_HOSTS),
         min_length=1,
     )
-    database_path: Path = Path("data/sub2api-mcp.db")
+    database_url: str = Field(
+        default="postgresql://guardian:guardian@127.0.0.1:5432/guardian",
+        min_length=1,
+        max_length=2048,
+    )
     legacy_core_root: Path = Field(default_factory=_default_core_root)
 
     access_tokens: list[AccessTokenConfig] = Field(min_length=1)
@@ -121,6 +125,13 @@ class Settings(BaseSettings):
         if base_url.username or base_url.password or base_url.query or base_url.fragment:
             raise ValueError("sub2api_base_url cannot contain credentials, query, or fragment")
         self.sub2api_base_url = self.sub2api_base_url.strip().rstrip("/")
+
+        database_url = urlsplit(self.database_url.strip())
+        if database_url.scheme not in {"postgres", "postgresql"} or not database_url.hostname:
+            raise ValueError("database_url must be a postgresql:// URL")
+        if not database_url.path.strip("/"):
+            raise ValueError("database_url must name a database")
+        self.database_url = self.database_url.strip()
 
         if self.actor_bridge_enabled and (
             self.actor_bridge_secret is None

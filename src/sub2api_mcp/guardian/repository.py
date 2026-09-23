@@ -83,7 +83,11 @@ CREATE TABLE IF NOT EXISTS guardian_channels (
     warmup_buckets INTEGER NOT NULL DEFAULT 0,
     first_seen_at TIMESTAMPTZ NOT NULL,
     last_seen_at TIMESTAMPTZ NOT NULL,
-    updated_at TIMESTAMPTZ NOT NULL
+    updated_at TIMESTAMPTZ NOT NULL,
+    -- Upstream removal tombstone.  A previous in-place SQLite migration added
+    -- this column separately.  It belongs in the base shape now that the
+    -- migration chain is gone.
+    removed_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_guardian_channels_group
     ON guardian_channels(group_id, health, channel_id);
