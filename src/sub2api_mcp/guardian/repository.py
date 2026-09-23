@@ -5,16 +5,15 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-import sqlite3
 import uuid
 from collections.abc import Callable
-from datetime import UTC, date, datetime, timedelta
-from pathlib import Path
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
 
+from ..db import Database, placeholders
 from ..errors import ServiceError
 from .contracts import (
     AccountRecoveryClassification,
@@ -51,39 +50,39 @@ CREATE TABLE IF NOT EXISTS guardian_policy (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     policy_json TEXT NOT NULL,
     revision INTEGER NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TIMESTAMPTZ NOT NULL
 );
 CREATE TABLE IF NOT EXISTS guardian_group_overrides (
     group_id TEXT PRIMARY KEY,
     policy_json TEXT NOT NULL,
     revision INTEGER NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TIMESTAMPTZ NOT NULL
 );
 CREATE TABLE IF NOT EXISTS guardian_channel_overrides (
     channel_id TEXT PRIMARY KEY,
     override_json TEXT NOT NULL,
     revision INTEGER NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TIMESTAMPTZ NOT NULL
 );
 CREATE TABLE IF NOT EXISTS guardian_channels (
     channel_id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     group_id TEXT,
     upstream_status TEXT NOT NULL,
-    upstream_schedulable INTEGER NOT NULL,
+    upstream_schedulable BOOLEAN NOT NULL,
     health TEXT NOT NULL,
     score REAL NOT NULL,
     latency_ms INTEGER,
-    desired_schedulable INTEGER NOT NULL,
+    desired_schedulable BOOLEAN NOT NULL,
     manual_control TEXT NOT NULL,
     details_json TEXT NOT NULL,
     confidence REAL NOT NULL DEFAULT 0,
     freshness_state TEXT NOT NULL DEFAULT 'EXPIRED',
-    last_evidence_at TEXT,
+    last_evidence_at TIMESTAMPTZ,
     warmup_buckets INTEGER NOT NULL DEFAULT 0,
-    first_seen_at TEXT NOT NULL,
-    last_seen_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    first_seen_at TIMESTAMPTZ NOT NULL,
+    last_seen_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_guardian_channels_group
     ON guardian_channels(group_id, health, channel_id);
@@ -95,9 +94,9 @@ CREATE TABLE IF NOT EXISTS guardian_groups (
     error_count INTEGER NOT NULL DEFAULT 0,
     temporary_unavailable_count INTEGER NOT NULL DEFAULT 0,
     closed_count INTEGER NOT NULL DEFAULT 0,
-    first_seen_at TEXT NOT NULL,
-    last_seen_at TEXT NOT NULL,
-    removed_at TEXT
+    first_seen_at TIMESTAMPTZ NOT NULL,
+    last_seen_at TIMESTAMPTZ NOT NULL,
+    removed_at TIMESTAMPTZ
 );
 CREATE TABLE IF NOT EXISTS guardian_samples (
     sample_id TEXT PRIMARY KEY,
@@ -105,30 +104,30 @@ CREATE TABLE IF NOT EXISTS guardian_samples (
     source TEXT NOT NULL,
     event_type TEXT NOT NULL,
     score INTEGER NOT NULL,
-    occurred_at TEXT NOT NULL,
+    occurred_at TIMESTAMPTZ NOT NULL,
     ttfb_ms INTEGER,
     status_code INTEGER,
     message TEXT NOT NULL,
     source_event_id TEXT,
-    bucket_at TEXT,
+    bucket_at TIMESTAMPTZ,
     reliability REAL NOT NULL DEFAULT 1.0,
-    ingested_at TEXT,
-    legacy INTEGER NOT NULL DEFAULT 1
+    ingested_at TIMESTAMPTZ,
+    legacy BOOLEAN NOT NULL DEFAULT TRUE
 );
 CREATE INDEX IF NOT EXISTS idx_guardian_samples_channel
     ON guardian_samples(channel_id, occurred_at DESC, sample_id DESC);
 CREATE TABLE IF NOT EXISTS guardian_runs (
     run_id TEXT PRIMARY KEY,
     idempotency_key TEXT UNIQUE,
-    dry_run INTEGER NOT NULL,
+    dry_run BOOLEAN NOT NULL,
     status TEXT NOT NULL,
     result_json TEXT,
     error_code TEXT,
     error_message TEXT,
-    cancel_requested INTEGER NOT NULL DEFAULT 0,
-    started_at TEXT NOT NULL,
-    finished_at TEXT,
-    updated_at TEXT NOT NULL
+    cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
+    started_at TIMESTAMPTZ NOT NULL,
+    finished_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_guardian_runs_started
     ON guardian_runs(started_at DESC, run_id DESC);
@@ -140,7 +139,7 @@ CREATE TABLE IF NOT EXISTS guardian_events (
     group_id TEXT,
     message TEXT NOT NULL,
     details_json TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_guardian_events_created
     ON guardian_events(created_at DESC, event_id DESC);
@@ -151,23 +150,23 @@ CREATE TABLE IF NOT EXISTS guardian_probe_ledger (
     input_tokens INTEGER,
     output_tokens INTEGER,
     estimated_cost REAL,
-    priced INTEGER NOT NULL,
+    priced BOOLEAN NOT NULL,
     budget_date TEXT,
     request_source TEXT,
     blocked_reason TEXT,
-    occurred_at TEXT NOT NULL
+    occurred_at TIMESTAMPTZ NOT NULL
 );
 CREATE TABLE IF NOT EXISTS guardian_leases (
     lease_key TEXT PRIMARY KEY,
     owner TEXT NOT NULL,
-    expires_at TEXT NOT NULL
+    expires_at TIMESTAMPTZ NOT NULL
 );
 CREATE TABLE IF NOT EXISTS guardian_idempotency (
     idempotency_key TEXT NOT NULL,
     action TEXT NOT NULL,
     subject TEXT NOT NULL,
     result_json TEXT NOT NULL,
-    created_at TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
     PRIMARY KEY(idempotency_key, action, subject)
 );
 CREATE TABLE IF NOT EXISTS guardian_input_snapshots (
@@ -175,23 +174,23 @@ CREATE TABLE IF NOT EXISTS guardian_input_snapshots (
     schema_version INTEGER NOT NULL,
     payload_json TEXT NOT NULL,
     payload_hash TEXT NOT NULL,
-    captured_at TEXT NOT NULL,
+    captured_at TIMESTAMPTZ NOT NULL,
     claim_owner TEXT,
-    claim_expires_at TEXT,
-    consumed_at TEXT,
-    created_at TEXT NOT NULL
+    claim_expires_at TIMESTAMPTZ,
+    consumed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_guardian_input_snapshots_claim
     ON guardian_input_snapshots(consumed_at, claim_expires_at, captured_at, snapshot_id);
 CREATE TABLE IF NOT EXISTS guardian_traffic_buckets (
     channel_id TEXT NOT NULL,
-    bucket_at TEXT NOT NULL,
+    bucket_at TIMESTAMPTZ NOT NULL,
     event_count INTEGER NOT NULL,
     score_sum REAL NOT NULL,
     ttfb_p95_ms INTEGER,
     details_json TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL,
     PRIMARY KEY(channel_id, bucket_at)
 );
 CREATE INDEX IF NOT EXISTS idx_guardian_traffic_buckets_recent
@@ -204,11 +203,11 @@ CREATE TABLE IF NOT EXISTS guardian_account_observations (
     account_id TEXT NOT NULL,
     group_ids_json TEXT NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('active', 'error', 'disabled', 'inactive')),
-    schedulable INTEGER NOT NULL CHECK (schedulable IN (0, 1)),
-    expired INTEGER NOT NULL CHECK (expired IN (0, 1)),
-    temporary_unavailable INTEGER NOT NULL CHECK (temporary_unavailable IN (0, 1)),
-    automatic_pause INTEGER NOT NULL DEFAULT 0 CHECK (automatic_pause IN (0, 1)),
-    observed_at TEXT NOT NULL,
+    schedulable BOOLEAN NOT NULL CHECK (schedulable IN (TRUE, FALSE)),
+    expired BOOLEAN NOT NULL CHECK (expired IN (TRUE, FALSE)),
+    temporary_unavailable BOOLEAN NOT NULL CHECK (temporary_unavailable IN (TRUE, FALSE)),
+    automatic_pause BOOLEAN NOT NULL DEFAULT FALSE CHECK (automatic_pause IN (TRUE, FALSE)),
+    observed_at TIMESTAMPTZ NOT NULL,
     PRIMARY KEY(snapshot_id, account_id)
 );
 CREATE INDEX IF NOT EXISTS idx_guardian_account_observations_latest
@@ -221,9 +220,9 @@ CREATE TABLE IF NOT EXISTS guardian_channel_error_episodes (
     group_id TEXT,
     opened_snapshot_id TEXT NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('OPEN', 'CLOSED')),
-    opened_at TEXT NOT NULL,
-    closed_at TEXT,
-    updated_at TEXT NOT NULL
+    opened_at TIMESTAMPTZ NOT NULL,
+    closed_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_guardian_channel_error_episode_open
     ON guardian_channel_error_episodes(channel_id) WHERE status = 'OPEN';
@@ -244,9 +243,9 @@ CREATE TABLE IF NOT EXISTS guardian_account_recovery_runs (
         status IN ('RUNNING', 'SUCCEEDED', 'FAILED', 'INTERRUPTED')
     ),
     result_json TEXT,
-    started_at TEXT NOT NULL,
-    finished_at TEXT,
-    updated_at TEXT NOT NULL
+    started_at TIMESTAMPTZ NOT NULL,
+    finished_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_guardian_account_recovery_runs_recent
     ON guardian_account_recovery_runs(started_at DESC, run_id DESC);
@@ -268,18 +267,18 @@ CREATE TABLE IF NOT EXISTS guardian_account_recovery_ledger (
         result IN ('ENABLED', 'DISABLED', 'INDETERMINATE', 'SKIPPED')
     ),
     reason TEXT NOT NULL,
-    tested INTEGER NOT NULL CHECK (tested IN (0, 1)),
-    occurred_at TEXT NOT NULL
+    tested BOOLEAN NOT NULL CHECK (tested IN (TRUE, FALSE)),
+    occurred_at TIMESTAMPTZ NOT NULL
 );
 CREATE TABLE IF NOT EXISTS guardian_account_preferences (
     account_id TEXT PRIMARY KEY,
     preferred_probe_model TEXT,
-    updated_at TEXT NOT NULL
+    updated_at TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_guardian_account_recovery_ledger_run
     ON guardian_account_recovery_ledger(run_id, occurred_at, ledger_id);
 CREATE INDEX IF NOT EXISTS idx_guardian_account_recovery_ledger_recent
-    ON guardian_account_recovery_ledger(occurred_at, account_id) WHERE tested = 1;
+    ON guardian_account_recovery_ledger(occurred_at, account_id) WHERE tested;
 CREATE INDEX IF NOT EXISTS idx_guardian_samples_retention
     ON guardian_samples(occurred_at, sample_id);
 CREATE INDEX IF NOT EXISTS idx_guardian_runs_retention
@@ -307,14 +306,40 @@ def _iso(value: datetime) -> str:
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
-def _dt(value: str | None) -> datetime | None:
+def _dt(value: str | datetime | None) -> datetime | None:
+    """Normalize a timestamp coming back from the database.
+
+    PostgreSQL returns ``datetime`` objects for ``TIMESTAMPTZ`` columns, while
+    the retained JSON/text paths and the SQLite import still hand over ISO
+    strings, so both are accepted here.
+    """
+
     if value is None:
         return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
 def _json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def _rowcount(status: str | None) -> int:
+    """Extract the affected row count from an ``asyncpg`` command status.
+
+    ``asyncpg`` returns strings such as ``"UPDATE 3"`` or ``"DELETE 0"`` where
+    SQLite exposed ``Cursor.rowcount``.  Returning 0 for an unparsable
+    status keeps callers that only log the number safe.
+    """
+
+    if not status:
+        return 0
+    _, _, tail = status.rpartition(" ")
+    try:
+        return int(tail)
+    except ValueError:
+        return 0
 
 
 def _snapshot_id(value: str) -> str:
@@ -350,430 +375,61 @@ def _decode_cursor(value: str) -> tuple[str, str]:
 class GuardianRepository:
     SCHEMA_VERSION = GUARDIAN_SCHEMA_VERSION
 
-    def __init__(self, path: Path, *, clock: Callable[[], datetime] = _utc_now) -> None:
-        self.path = path
+    def __init__(self, database: Database, *, clock: Callable[[], datetime] = _utc_now) -> None:
+        self._database = database
         self._clock = clock
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=30, isolation_level=None)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA busy_timeout = 30000")
-        connection.execute("PRAGMA journal_mode = WAL")
-        return connection
-
     async def initialize(self) -> None:
-        await asyncio.to_thread(self._initialize_sync)
+        """Create the schema and seed defaults.
 
-    def _initialize_sync(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        now = _iso(self._clock())
+        The legacy SQLite schema carried eleven incremental migrations
+        (``_migrate_v1_to_v2_sync`` .. ``_migrate_v11_to_v12_sync``) that
+        upgraded an existing file in place.  A fresh PostgreSQL deployment
+        always starts at the current shape, so those steps are not reproduced
+        here; data moves across via ``scripts/migrate_sqlite_to_postgres.py``.
+        """
+
+        now = self._clock()
         default = GuardianPolicy()
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
+        async with self._database.transaction() as connection:
             for statement in GUARDIAN_SCHEMA_SQL.split(";"):
                 if statement.strip():
-                    connection.execute(statement)
-            row = connection.execute(
-                "SELECT value FROM guardian_metadata WHERE key = 'schema_version'"
-            ).fetchone()
-            current_version = int(row["value"]) if row is not None else 0
-            if current_version > self.SCHEMA_VERSION:
-                raise RuntimeError("Guardian database schema is newer than this service")
-            if current_version < 2:
-                self._migrate_v1_to_v2_sync(connection)
-            if current_version < 3:
-                self._migrate_v2_to_v3_sync(connection)
-            if current_version < 4:
-                self._migrate_v3_to_v4_sync(connection)
-            if current_version < 5:
-                self._migrate_v4_to_v5_sync(connection)
-            if current_version < 6:
-                self._migrate_v5_to_v6_sync(connection)
-            if current_version < 7:
-                self._migrate_v6_to_v7_sync(connection)
-            if current_version < 8:
-                self._migrate_v7_to_v8_sync(connection, now=now)
-            if current_version < 9:
-                self._migrate_v8_to_v9_sync(connection)
-            if current_version < 10:
-                self._migrate_v9_to_v10_sync(connection)
-            if current_version < 11:
-                self._migrate_v10_to_v11_sync(connection)
-            if current_version < 12:
-                self._migrate_v11_to_v12_sync(connection)
-            connection.execute(
-                "INSERT INTO guardian_metadata(key, value) VALUES('schema_version', ?) "
+                    await connection.execute(statement)
+            for statement in GUARDIAN_ACCOUNT_RECOVERY_SCHEMA_SQL.split(";"):
+                if statement.strip():
+                    await connection.execute(statement)
+            await connection.execute(
+                "INSERT INTO guardian_metadata(key, value) VALUES('schema_version', $1) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                (str(GUARDIAN_SCHEMA_VERSION),),
+                str(GUARDIAN_SCHEMA_VERSION),
             )
-            connection.execute(
-                "INSERT OR IGNORE INTO guardian_policy"
-                "(singleton, policy_json, revision, updated_at) VALUES(1, ?, 1, ?)",
-                (default.model_dump_json(), now),
+            await connection.execute(
+                "INSERT INTO guardian_policy"
+                "(singleton, policy_json, revision, updated_at) VALUES(1, $1, 1, $2) "
+                "ON CONFLICT(singleton) DO NOTHING",
+                default.model_dump_json(),
+                now,
             )
-            connection.execute(
+            await connection.execute(
                 "UPDATE guardian_runs SET status = 'INTERRUPTED', "
                 "error_code = 'SERVICE_RESTARTED', "
                 "error_message = 'The service restarted during this Guardian run', "
-                "finished_at = ?, updated_at = ? WHERE status = 'RUNNING'",
-                (now, now),
+                "finished_at = $1, updated_at = $2 WHERE status = 'RUNNING'",
+                now,
+                now,
             )
-            connection.execute(
+            await connection.execute(
                 "UPDATE guardian_account_recovery_runs SET status = 'INTERRUPTED', "
-                "finished_at = ?, updated_at = ? WHERE status = 'RUNNING'",
-                (now, now),
+                "finished_at = $1, updated_at = $2 WHERE status = 'RUNNING'",
+                now,
+                now,
             )
-            connection.execute("COMMIT")
-        except Exception:
-            if connection.in_transaction:
-                connection.execute("ROLLBACK")
-            raise
-        finally:
-            connection.close()
-
-    @staticmethod
-    def _migrate_v1_to_v2_sync(connection: sqlite3.Connection) -> None:
-        GuardianRepository._ensure_column_sync(
-            connection,
-            "guardian_channels",
-            "confidence",
-            "REAL NOT NULL DEFAULT 0",
-        )
-        GuardianRepository._ensure_column_sync(
-            connection,
-            "guardian_channels",
-            "freshness_state",
-            "TEXT NOT NULL DEFAULT 'EXPIRED'",
-        )
-        GuardianRepository._ensure_column_sync(
-            connection,
-            "guardian_channels",
-            "last_evidence_at",
-            "TEXT",
-        )
-        GuardianRepository._ensure_column_sync(
-            connection,
-            "guardian_channels",
-            "warmup_buckets",
-            "INTEGER NOT NULL DEFAULT 0",
-        )
-        GuardianRepository._ensure_column_sync(
-            connection,
-            "guardian_samples",
-            "source_event_id",
-            "TEXT",
-        )
-        GuardianRepository._ensure_column_sync(
-            connection,
-            "guardian_samples",
-            "bucket_at",
-            "TEXT",
-        )
-        GuardianRepository._ensure_column_sync(
-            connection,
-            "guardian_samples",
-            "reliability",
-            "REAL NOT NULL DEFAULT 1.0",
-        )
-        GuardianRepository._ensure_column_sync(
-            connection,
-            "guardian_samples",
-            "ingested_at",
-            "TEXT",
-        )
-        GuardianRepository._ensure_column_sync(
-            connection,
-            "guardian_samples",
-            "legacy",
-            "INTEGER NOT NULL DEFAULT 1",
-        )
-        GuardianRepository._ensure_column_sync(
-            connection,
-            "guardian_probe_ledger",
-            "budget_date",
-            "TEXT",
-        )
-        GuardianRepository._ensure_column_sync(
-            connection,
-            "guardian_probe_ledger",
-            "request_source",
-            "TEXT",
-        )
-        GuardianRepository._ensure_column_sync(
-            connection,
-            "guardian_probe_ledger",
-            "blocked_reason",
-            "TEXT",
-        )
-        connection.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_guardian_samples_source_event "
-            "ON guardian_samples(channel_id, source, source_event_id) "
-            "WHERE source_event_id IS NOT NULL"
-        )
-        connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_guardian_samples_bucket "
-            "ON guardian_samples(channel_id, bucket_at DESC)"
-        )
-
-    @staticmethod
-    def _migrate_v2_to_v3_sync(connection: sqlite3.Connection) -> None:
-        GuardianRepository._ensure_column_sync(
-            connection,
-            "guardian_input_snapshots",
-            "claim_owner",
-            "TEXT",
-        )
-        GuardianRepository._ensure_column_sync(
-            connection,
-            "guardian_input_snapshots",
-            "claim_expires_at",
-            "TEXT",
-        )
-        connection.execute("DROP INDEX IF EXISTS idx_guardian_input_snapshots_claim")
-        connection.execute(
-            "CREATE INDEX idx_guardian_input_snapshots_claim "
-            "ON guardian_input_snapshots"
-            "(consumed_at, claim_expires_at, captured_at, snapshot_id)"
-        )
-
-    @staticmethod
-    def _migrate_v3_to_v4_sync(connection: sqlite3.Connection) -> None:
-        for statement in GUARDIAN_ACCOUNT_RECOVERY_SCHEMA_SQL.split(";"):
-            if statement.strip():
-                connection.execute(statement)
-
-    @staticmethod
-    def _migrate_v4_to_v5_sync(connection: sqlite3.Connection) -> None:
-        columns = {
-            row["name"]
-            for row in connection.execute("PRAGMA table_info(guardian_field_ownership)").fetchall()
-        }
-        if not columns or "account_id" in columns:
-            return
-        connection.execute(
-            "ALTER TABLE guardian_field_ownership RENAME TO guardian_field_ownership_v4"
-        )
-        connection.execute(
-            "CREATE TABLE guardian_field_ownership ("
-            "channel_id TEXT NOT NULL, account_id TEXT NOT NULL DEFAULT '*', "
-            "field_name TEXT NOT NULL, owner TEXT NOT NULL, baseline_json TEXT, "
-            "last_guardian_json TEXT, last_write_at TEXT, updated_at TEXT NOT NULL, "
-            "PRIMARY KEY(channel_id, account_id, field_name))"
-        )
-        connection.execute(
-            "INSERT INTO guardian_field_ownership("
-            "channel_id, account_id, field_name, owner, baseline_json, "
-            "last_guardian_json, last_write_at, updated_at) "
-            "SELECT channel_id, '*', field_name, owner, baseline_json, "
-            "last_guardian_json, last_write_at, updated_at "
-            "FROM guardian_field_ownership_v4"
-        )
-        connection.execute("DROP TABLE guardian_field_ownership_v4")
-
-    @staticmethod
-    def _migrate_v5_to_v6_sync(connection: sqlite3.Connection) -> None:
-        connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_guardian_samples_retention "
-            "ON guardian_samples(occurred_at, sample_id)"
-        )
-        connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_guardian_runs_retention "
-            "ON guardian_runs(updated_at, run_id) WHERE status <> 'RUNNING'"
-        )
-        connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_guardian_input_snapshots_retention "
-            "ON guardian_input_snapshots(captured_at, snapshot_id) "
-            "WHERE consumed_at IS NOT NULL"
-        )
-        connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_guardian_closed_episodes_retention "
-            "ON guardian_channel_error_episodes(updated_at, episode_id) "
-            "WHERE status = 'CLOSED'"
-        )
-        connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_guardian_recovery_runs_retention "
-            "ON guardian_account_recovery_runs(updated_at, run_id) "
-            "WHERE status <> 'RUNNING'"
-        )
-        connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_guardian_account_observations_retention "
-            "ON guardian_account_observations(observed_at, snapshot_id, account_id)"
-        )
-        connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_guardian_probe_ledger_occurred "
-            "ON guardian_probe_ledger(occurred_at, ledger_id)"
-        )
-        connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_guardian_idempotency_created "
-            "ON guardian_idempotency(created_at, idempotency_key, action, subject)"
-        )
-
-    @staticmethod
-    def _migrate_v6_to_v7_sync(connection: sqlite3.Connection) -> None:
-        connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_guardian_account_recovery_ledger_recent "
-            "ON guardian_account_recovery_ledger(occurred_at, account_id) "
-            "WHERE tested = 1"
-        )
-
-    @staticmethod
-    def _migrate_v7_to_v8_sync(
-        connection: sqlite3.Connection,
-        *,
-        now: str,
-    ) -> None:
-        for index_name in (
-            "idx_guardian_account_recovery_runs_recent",
-            "idx_guardian_recovery_runs_retention",
-            "idx_guardian_account_recovery_ledger_run",
-            "idx_guardian_account_recovery_ledger_recent",
-        ):
-            connection.execute(f"DROP INDEX IF EXISTS {index_name}")
-        connection.execute(
-            "ALTER TABLE guardian_account_recovery_ledger "
-            "RENAME TO guardian_account_recovery_ledger_v7"
-        )
-        connection.execute(
-            "ALTER TABLE guardian_account_recovery_runs RENAME TO guardian_account_recovery_runs_v7"
-        )
-        connection.execute(
-            "CREATE TABLE guardian_account_recovery_runs ("
-            "run_id TEXT PRIMARY KEY, dedup_key TEXT NOT NULL UNIQUE, "
-            "trigger TEXT NOT NULL CHECK (trigger IN ("
-            "'BAD_ACCOUNT_STATE', 'CHANNEL_ERROR', 'HOURLY_ACTIVE_CHECK', 'MANUAL')), "
-            "snapshot_id TEXT, episode_id TEXT, "
-            "policy_revision INTEGER NOT NULL CHECK(policy_revision > 0), "
-            "status TEXT NOT NULL CHECK(status IN "
-            "('RUNNING', 'SUCCEEDED', 'FAILED', 'INTERRUPTED')), "
-            "result_json TEXT, started_at TEXT NOT NULL, finished_at TEXT, "
-            "updated_at TEXT NOT NULL)"
-        )
-        connection.execute(
-            "CREATE TABLE guardian_account_recovery_ledger ("
-            "ledger_id TEXT PRIMARY KEY, run_id TEXT NOT NULL "
-            "REFERENCES guardian_account_recovery_runs(run_id) ON DELETE CASCADE, "
-            "dedup_key TEXT NOT NULL UNIQUE, account_id TEXT NOT NULL, "
-            "channel_id TEXT, group_id TEXT, "
-            "classification TEXT NOT NULL CHECK(classification IN ("
-            "'AVAILABLE', 'MANUAL_PAUSE', 'UPSTREAM_ERROR', 'DISABLED', "
-            "'SYSTEM_QUARANTINE', 'EXCLUDED')), "
-            "result TEXT NOT NULL CHECK(result IN "
-            "('ENABLED', 'DISABLED', 'INDETERMINATE', 'SKIPPED')), "
-            "reason TEXT NOT NULL, tested INTEGER NOT NULL CHECK(tested IN (0, 1)), "
-            "occurred_at TEXT NOT NULL)"
-        )
-        connection.execute(
-            "INSERT INTO guardian_account_recovery_runs "
-            "SELECT * FROM guardian_account_recovery_runs_v7"
-        )
-        connection.execute(
-            "INSERT INTO guardian_account_recovery_ledger "
-            "SELECT * FROM guardian_account_recovery_ledger_v7"
-        )
-        connection.execute("DROP TABLE guardian_account_recovery_ledger_v7")
-        connection.execute("DROP TABLE guardian_account_recovery_runs_v7")
-        connection.execute(
-            "CREATE INDEX idx_guardian_account_recovery_runs_recent "
-            "ON guardian_account_recovery_runs(started_at DESC, run_id DESC)"
-        )
-        connection.execute(
-            "CREATE INDEX idx_guardian_recovery_runs_retention "
-            "ON guardian_account_recovery_runs(updated_at, run_id) "
-            "WHERE status <> 'RUNNING'"
-        )
-        connection.execute(
-            "CREATE INDEX idx_guardian_account_recovery_ledger_run "
-            "ON guardian_account_recovery_ledger(run_id, occurred_at, ledger_id)"
-        )
-        connection.execute(
-            "CREATE INDEX idx_guardian_account_recovery_ledger_recent "
-            "ON guardian_account_recovery_ledger(occurred_at, account_id) "
-            "WHERE tested = 1"
-        )
-
-        row = connection.execute(
-            "SELECT policy_json, revision FROM guardian_policy WHERE singleton = 1"
-        ).fetchone()
-        if row is None:
-            return
-        raw_policy = cast(dict[str, Any], json.loads(row["policy_json"]))
-        raw_probe = raw_policy.get("probe")
-        probe = dict(cast(dict[str, Any], raw_probe)) if isinstance(raw_probe, dict) else {}
-        probe.update(
-            {
-                "enabled": True,
-                "interval_seconds": 3600,
-                "model": "",
-                "prompt": "hi",
-            }
-        )
-        raw_policy["probe"] = probe
-        revision = int(row["revision"]) + 1
-        raw_policy["revision"] = revision
-        connection.execute(
-            "UPDATE guardian_policy SET policy_json = ?, revision = ?, updated_at = ? "
-            "WHERE singleton = 1",
-            (_json(raw_policy), revision, now),
-        )
-
-    @staticmethod
-    def _migrate_v8_to_v9_sync(connection: sqlite3.Connection) -> None:
-        """Add account pause provenance without rewriting historical snapshots."""
-
-        GuardianRepository._ensure_column_sync(
-            connection,
-            "guardian_account_observations",
-            "automatic_pause",
-            "INTEGER NOT NULL DEFAULT 0 CHECK (automatic_pause IN (0, 1))",
-        )
-
-    @staticmethod
-    def _migrate_v9_to_v10_sync(connection: sqlite3.Connection) -> None:
-        """Drop the removed weight-writeback tables from retired schemas."""
-
-        connection.execute("DROP TABLE IF EXISTS guardian_field_ownership")
-        connection.execute("DROP TABLE IF EXISTS guardian_write_audits")
-
-    @staticmethod
-    def _migrate_v10_to_v11_sync(connection: sqlite3.Connection) -> None:
-        """Track upstream removal on channels and persist the full group list."""
-
-        GuardianRepository._ensure_column_sync(
-            connection,
-            "guardian_channels",
-            "removed_at",
-            "TEXT",
-        )
-
-    @staticmethod
-    def _migrate_v11_to_v12_sync(connection: sqlite3.Connection) -> None:
-        """Drop the leftover channel-config restore table from retired writeback."""
-
-        connection.execute("DROP TABLE IF EXISTS guardian_original_config")
-
-    @staticmethod
-    def _ensure_column_sync(
-        connection: sqlite3.Connection,
-        table: str,
-        column: str,
-        definition: str,
-    ) -> None:
-        columns = {
-            row["name"] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
-        }
-        if column not in columns:
-            connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     async def get_policy(self) -> GuardianPolicy:
-        return await asyncio.to_thread(self._get_policy_sync)
-
-    def _get_policy_sync(self) -> GuardianPolicy:
-        with self._connect() as connection:
-            row = connection.execute(
+        async with self._database.acquire() as connection:
+            row = await connection.fetchrow(
                 "SELECT policy_json, revision FROM guardian_policy WHERE singleton = 1"
-            ).fetchone()
+            )
         if row is None:
             raise RuntimeError("Guardian repository has not been initialized")
         data = cast(dict[str, Any], json.loads(row["policy_json"]))
@@ -781,14 +437,11 @@ class GuardianRepository:
         return GuardianPolicy.model_validate(data)
 
     async def pending_input_snapshot_count(self) -> int:
-        return await asyncio.to_thread(self._pending_input_snapshot_count_sync)
-
-    def _pending_input_snapshot_count_sync(self) -> int:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT COUNT(*) AS count FROM guardian_input_snapshots WHERE consumed_at IS NULL"
-            ).fetchone()
-        return int(row["count"] if row is not None else 0)
+        async with self._database.acquire() as connection:
+            value = await connection.fetchval(
+                "SELECT COUNT(*) FROM guardian_input_snapshots WHERE consumed_at IS NULL"
+            )
+        return int(value or 0)
 
     async def monitored_group_ids_for_snapshot(
         self,
@@ -797,12 +450,39 @@ class GuardianRepository:
         excluded_channel_ids: frozenset[str] = frozenset(),
         excluded_group_ids: frozenset[str] = frozenset(),
     ) -> frozenset[str] | None:
-        return await asyncio.to_thread(
-            self._monitored_group_ids_for_snapshot_sync,
-            snapshot_id,
-            excluded_channel_ids=excluded_channel_ids,
-            excluded_group_ids=excluded_group_ids,
-        )
+        async with self._database.acquire() as connection:
+            row = await connection.fetchrow(
+                "SELECT payload_json FROM guardian_input_snapshots WHERE snapshot_id = $1",
+                _snapshot_id(snapshot_id),
+            )
+            excluded_monitor_rows = await connection.fetch(
+                "SELECT channel_id FROM guardian_channels WHERE manual_control = 'EXCLUDED'"
+            )
+        if row is None:
+            return None
+        try:
+            snapshot = UpstreamProbeSnapshot.model_validate_json(row["payload_json"])
+        except ValidationError:
+            return None
+        # Only groups reachable through a monitored channel are in scope:
+        # excluded channels never seed their group, and account-bound groups
+        # join only when an account is shared with a monitored group.  Groups
+        # that lost their channel entirely (closed upstream) drop out so
+        # account recovery does not test or mutate accounts Guardian cannot
+        # actually route traffic to.
+        excluded_monitor_ids = {
+            str(excluded_row["channel_id"]) for excluded_row in excluded_monitor_rows
+        } | set(excluded_channel_ids)
+        entry_group_ids = {
+            entry.group_id
+            for entry in snapshot.entries
+            if entry.group_id is not None and entry.monitor_id not in excluded_monitor_ids
+        } - set(excluded_group_ids)
+        group_ids = set(entry_group_ids)
+        for account in snapshot.accounts:
+            if entry_group_ids & set(account.group_ids):
+                group_ids.update(account.group_ids)
+        return frozenset(group_ids - set(excluded_group_ids))
 
     async def probe_templates_for_snapshot(
         self,
@@ -815,20 +495,11 @@ class GuardianRepository:
         account observations, including after a process restart.
         """
 
-        return await asyncio.to_thread(
-            self._probe_templates_for_snapshot_sync,
-            snapshot_id,
-        )
-
-    def _probe_templates_for_snapshot_sync(
-        self,
-        snapshot_id: str,
-    ) -> tuple[GuardianProbeTemplate, ...]:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT payload_json FROM guardian_input_snapshots WHERE snapshot_id = ?",
-                (_snapshot_id(snapshot_id),),
-            ).fetchone()
+        async with self._database.acquire() as connection:
+            row = await connection.fetchrow(
+                "SELECT payload_json FROM guardian_input_snapshots WHERE snapshot_id = $1",
+                _snapshot_id(snapshot_id),
+            )
             if row is None:
                 return ()
             try:
@@ -838,31 +509,25 @@ class GuardianRepository:
                     "GUARDIAN_SNAPSHOT_DATA_INVALID",
                     "Persisted Guardian probe snapshot data is invalid",
                 ) from exc
-            channel_rows = connection.execute(
+            channel_rows = await connection.fetch(
                 "SELECT channel_id, override_json FROM guardian_channel_overrides"
-            ).fetchall()
-            group_rows = connection.execute(
-                "SELECT group_id, policy_json FROM guardian_group_overrides"
-            ).fetchall()
-        channel_overrides = {
-            str(row["channel_id"]): ChannelPolicyOverride.model_validate_json(
-                row["override_json"]
             )
+            group_rows = await connection.fetch(
+                "SELECT group_id, policy_json FROM guardian_group_overrides"
+            )
+        channel_overrides = {
+            str(row["channel_id"]): ChannelPolicyOverride.model_validate_json(row["override_json"])
             for row in channel_rows
         }
         group_overrides = {
-            str(row["group_id"]): GroupPolicyOverride.model_validate_json(
-                row["policy_json"]
-            )
+            str(row["group_id"]): GroupPolicyOverride.model_validate_json(row["policy_json"])
             for row in group_rows
         }
         templates: list[GuardianProbeTemplate] = []
         for entry in snapshot.entries:
             channel_override = channel_overrides.get(entry.monitor_id)
             group_override = (
-                group_overrides.get(entry.group_id)
-                if entry.group_id is not None
-                else None
+                group_overrides.get(entry.group_id) if entry.group_id is not None else None
             )
             effective_model = (entry.probe_model or "").strip()
             channel_model = (
@@ -893,125 +558,66 @@ class GuardianRepository:
         templates.sort(key=lambda item: (item.group_id or "", item.channel_id))
         return tuple(templates)
 
-    def _monitored_group_ids_for_snapshot_sync(
-        self,
-        snapshot_id: str,
-        *,
-        excluded_channel_ids: frozenset[str] = frozenset(),
-        excluded_group_ids: frozenset[str] = frozenset(),
-    ) -> frozenset[str] | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT payload_json FROM guardian_input_snapshots WHERE snapshot_id = ?",
-                (_snapshot_id(snapshot_id),),
-            ).fetchone()
-            excluded_monitor_rows = connection.execute(
-                "SELECT channel_id FROM guardian_channels "
-                "WHERE manual_control = 'EXCLUDED'"
-            ).fetchall()
-        if row is None:
-            return None
-        try:
-            snapshot = UpstreamProbeSnapshot.model_validate_json(row["payload_json"])
-        except ValidationError:
-            return None
-        # Only groups reachable through a monitored channel are in scope:
-        # excluded channels never seed their group, and account-bound groups
-        # join only when an account is shared with a monitored group.  Groups
-        # that lost their channel entirely (closed upstream) drop out so
-        # account recovery does not test or mutate accounts Guardian cannot
-        # actually route traffic to.
-        excluded_monitor_ids = {
-            str(excluded_row["channel_id"]) for excluded_row in excluded_monitor_rows
-        } | set(excluded_channel_ids)
-        entry_group_ids = {
-            entry.group_id
-            for entry in snapshot.entries
-            if entry.group_id is not None
-            and entry.monitor_id not in excluded_monitor_ids
-        } - set(excluded_group_ids)
-        group_ids = set(entry_group_ids)
-        for account in snapshot.accounts:
-            if entry_group_ids & set(account.group_ids):
-                group_ids.update(account.group_ids)
-        return frozenset(group_ids - set(excluded_group_ids))
-
     async def supersede_expired_input_snapshots(
         self,
         *,
         captured_before: datetime,
     ) -> int:
-        return await asyncio.to_thread(
-            self._supersede_expired_input_snapshots_sync,
-            captured_before,
-        )
-
-    def _supersede_expired_input_snapshots_sync(
-        self,
-        captured_before: datetime,
-    ) -> int:
         if captured_before.tzinfo is None:
             raise ValueError("snapshot expiry cutoff must be timezone-aware")
-        now = _iso(self._clock().astimezone(UTC))
-        cutoff = _iso(captured_before.astimezone(UTC))
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            latest = connection.execute(
+        now = self._clock().astimezone(UTC)
+        cutoff = captured_before.astimezone(UTC)
+        # The newest unconsumed snapshot is the one Guardian is about to read;
+        # everything older that is not currently claimed by a live worker is
+        # superseded.  ``FOR UPDATE`` on the candidate row keeps two workers
+        # from superseding each other's claim.
+        async with self._database.transaction() as connection:
+            latest = await connection.fetchrow(
                 "SELECT snapshot_id FROM guardian_input_snapshots "
                 "WHERE consumed_at IS NULL "
-                "ORDER BY captured_at DESC, snapshot_id DESC LIMIT 1"
-            ).fetchone()
-            if latest is None:
-                connection.execute("COMMIT")
-                return 0
-            result = connection.execute(
-                "UPDATE guardian_input_snapshots "
-                "SET consumed_at = ?, claim_owner = NULL, claim_expires_at = NULL "
-                "WHERE consumed_at IS NULL AND captured_at < ? AND snapshot_id <> ? "
-                "AND (claim_owner IS NULL OR claim_expires_at <= ?)",
-                (now, cutoff, latest["snapshot_id"], now),
+                "ORDER BY captured_at DESC, snapshot_id DESC LIMIT 1 "
+                "FOR UPDATE"
             )
-            connection.execute("COMMIT")
-            return result.rowcount
-        except Exception:
-            if connection.in_transaction:
-                connection.execute("ROLLBACK")
-            raise
-        finally:
-            connection.close()
+            if latest is None:
+                return 0
+            result = await connection.execute(
+                "UPDATE guardian_input_snapshots "
+                "SET consumed_at = $1, claim_owner = NULL, claim_expires_at = NULL "
+                "WHERE consumed_at IS NULL AND captured_at < $2 AND snapshot_id <> $3 "
+                "AND (claim_owner IS NULL OR claim_expires_at <= $4)",
+                now,
+                cutoff,
+                latest["snapshot_id"],
+                now,
+            )
+        return _rowcount(result)
 
     async def shared_sampling_started(self) -> bool:
-        return await asyncio.to_thread(self._shared_sampling_started_sync)
-
-    def _shared_sampling_started_sync(self) -> bool:
-        with self._connect() as connection:
-            row = connection.execute(
+        async with self._database.acquire() as connection:
+            value = await connection.fetchval(
                 "SELECT value FROM guardian_metadata WHERE key = 'shared_sampling_started'"
-            ).fetchone()
-        return bool(row is not None and row["value"] == "true")
+            )
+        return bool(value == "true")
 
     async def model_plaza_last_refresh(self) -> datetime | None:
-        return await asyncio.to_thread(self._model_plaza_last_refresh_sync)
-
-    def _model_plaza_last_refresh_sync(self) -> datetime | None:
-        with self._connect() as connection:
-            row = connection.execute(
+        async with self._database.acquire() as connection:
+            value = await connection.fetchval(
                 "SELECT value FROM guardian_metadata WHERE key = 'model_plaza_last_refresh'"
-            ).fetchone()
-        if row is None:
+            )
+        if value is None:
             return None
-        parsed = datetime.fromisoformat(row["value"])
+        parsed = datetime.fromisoformat(str(value))
         return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
     async def mark_model_plaza_refreshed(self, refreshed_at: datetime) -> None:
-        await asyncio.to_thread(self._mark_model_plaza_refreshed_sync, refreshed_at)
-
-    def _mark_model_plaza_refreshed_sync(self, refreshed_at: datetime) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                "INSERT OR REPLACE INTO guardian_metadata(key, value) VALUES(?, ?)",
-                ("model_plaza_last_refresh", _iso(refreshed_at)),
+        async with self._database.acquire() as connection:
+            await connection.execute(
+                "INSERT INTO guardian_metadata(key, value) VALUES($1, $2) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                "model_plaza_last_refresh",
+                # guardian_metadata.value is TEXT and also holds the schema
+                # version, so this one key keeps its ISO string form.
+                _iso(refreshed_at),
             )
 
     async def claim_input_snapshot(
@@ -1020,52 +626,37 @@ class GuardianRepository:
         *,
         lease_seconds: int,
     ) -> dict[str, Any] | None:
-        return await asyncio.to_thread(
-            self._claim_input_snapshot_sync,
-            owner,
-            lease_seconds,
-        )
-
-    def _claim_input_snapshot_sync(
-        self,
-        owner: str,
-        lease_seconds: int,
-    ) -> dict[str, Any] | None:
         if not owner or len(owner) > 200:
             raise ValueError("invalid snapshot claim owner")
         now_value = self._clock().astimezone(UTC)
-        now = _iso(now_value)
-        expires_at = _iso(now_value + timedelta(seconds=max(1, lease_seconds)))
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
+        expires_at = now_value + timedelta(seconds=max(1, lease_seconds))
+        # ``SKIP LOCKED`` reproduces SQLite's serialized claim: two workers
+        # picking snapshots concurrently each take a different row instead of
+        # blocking on the same one.
+        async with self._database.transaction() as connection:
+            row = await connection.fetchrow(
                 "SELECT snapshot_id FROM guardian_input_snapshots "
                 "WHERE consumed_at IS NULL AND "
-                "(claim_owner IS NULL OR claim_expires_at <= ?) "
-                "ORDER BY captured_at, snapshot_id LIMIT 1",
-                (now,),
-            ).fetchone()
-            if row is None:
-                connection.execute("COMMIT")
-                return None
-            connection.execute(
-                "UPDATE guardian_input_snapshots "
-                "SET claim_owner = ?, claim_expires_at = ? "
-                "WHERE snapshot_id = ? AND consumed_at IS NULL",
-                (owner, expires_at, row["snapshot_id"]),
+                "(claim_owner IS NULL OR claim_expires_at <= $1) "
+                "ORDER BY captured_at, snapshot_id LIMIT 1 "
+                "FOR UPDATE SKIP LOCKED",
+                now_value,
             )
-            claimed = connection.execute(
+            if row is None:
+                return None
+            await connection.execute(
+                "UPDATE guardian_input_snapshots "
+                "SET claim_owner = $1, claim_expires_at = $2 "
+                "WHERE snapshot_id = $3 AND consumed_at IS NULL",
+                owner,
+                expires_at,
+                row["snapshot_id"],
+            )
+            claimed = await connection.fetchrow(
                 "SELECT snapshot_id, payload_json, captured_at "
-                "FROM guardian_input_snapshots WHERE snapshot_id = ?",
-                (row["snapshot_id"],),
-            ).fetchone()
-            connection.execute("COMMIT")
-        except Exception:
-            connection.execute("ROLLBACK")
-            raise
-        finally:
-            connection.close()
+                "FROM guardian_input_snapshots WHERE snapshot_id = $1",
+                row["snapshot_id"],
+            )
         assert claimed is not None
         payload: object = json.loads(claimed["payload_json"])
         if not isinstance(payload, dict):
@@ -1077,50 +668,30 @@ class GuardianRepository:
         }
 
     async def consume_input_snapshot(self, snapshot_id: str, owner: str) -> bool:
-        return await asyncio.to_thread(
-            self._consume_input_snapshot_sync,
-            snapshot_id,
-            owner,
-        )
-
-    def _consume_input_snapshot_sync(self, snapshot_id: str, owner: str) -> bool:
-        with self._connect() as connection:
-            result = connection.execute(
+        async with self._database.acquire() as connection:
+            status = await connection.execute(
                 "UPDATE guardian_input_snapshots "
-                "SET consumed_at = ?, claim_owner = NULL, claim_expires_at = NULL "
-                "WHERE snapshot_id = ? AND claim_owner = ? AND consumed_at IS NULL",
-                (_iso(self._clock()), snapshot_id, owner),
+                "SET consumed_at = $1, claim_owner = NULL, claim_expires_at = NULL "
+                "WHERE snapshot_id = $2 AND claim_owner = $3 AND consumed_at IS NULL",
+                self._clock(),
+                snapshot_id,
+                owner,
             )
-        return result.rowcount == 1
+        return _rowcount(status) == 1
 
     async def release_input_snapshot(self, snapshot_id: str, owner: str) -> None:
-        await asyncio.to_thread(self._release_input_snapshot_sync, snapshot_id, owner)
-
-    def _release_input_snapshot_sync(self, snapshot_id: str, owner: str) -> None:
-        with self._connect() as connection:
-            connection.execute(
+        async with self._database.acquire() as connection:
+            await connection.execute(
                 "UPDATE guardian_input_snapshots "
                 "SET claim_owner = NULL, claim_expires_at = NULL "
-                "WHERE snapshot_id = ? AND claim_owner = ? AND consumed_at IS NULL",
-                (snapshot_id, owner),
+                "WHERE snapshot_id = $1 AND claim_owner = $2 AND consumed_at IS NULL",
+                snapshot_id,
+                owner,
             )
 
     async def upsert_account_observations(
         self,
         *,
-        snapshot_id: str,
-        observed_at: datetime,
-        observations: list[GuardianAccountObservation],
-    ) -> int:
-        return await asyncio.to_thread(
-            self._upsert_account_observations_sync,
-            snapshot_id,
-            observed_at,
-            observations,
-        )
-
-    def _upsert_account_observations_sync(
-        self,
         snapshot_id: str,
         observed_at: datetime,
         observations: list[GuardianAccountObservation],
@@ -1134,60 +705,52 @@ class GuardianRepository:
         if len(account_ids) != len(set(account_ids)):
             raise ValueError("account observations contain duplicate account IDs")
         inserted = 0
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
+        async with self._database.transaction() as connection:
             for observation in observations:
-                observation = self._normalize_account_observation_sync(
+                observation = await self._normalize_account_observation_sync(
                     connection,
                     observation,
                     snapshot_id=normalized_snapshot_id,
                     observed_at=observed_at,
                 )
-                existing = connection.execute(
+                existing = await connection.fetchrow(
                     "SELECT * FROM guardian_account_observations "
-                    "WHERE snapshot_id = ? AND account_id = ?",
-                    (normalized_snapshot_id, observation.account_id),
-                ).fetchone()
+                    "WHERE snapshot_id = $1 AND account_id = $2",
+                    normalized_snapshot_id,
+                    observation.account_id,
+                )
                 if existing is not None:
-                    if self._account_observation_from_row(existing) != observation or existing[
-                        "observed_at"
-                    ] != _iso(observed_at):
+                    if (
+                        self._account_observation_from_row(existing) != observation
+                        or existing["observed_at"] != observed_at
+                    ):
                         raise ServiceError(
                             "ACCOUNT_OBSERVATION_CONFLICT",
                             "The account observation changed for the same snapshot",
                         )
                     continue
-                connection.execute(
+                await connection.execute(
                     "INSERT INTO guardian_account_observations("
                     "snapshot_id, account_id, group_ids_json, status, schedulable, "
                     "expired, temporary_unavailable, automatic_pause, observed_at"
-                    ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        normalized_snapshot_id,
-                        observation.account_id,
-                        _json(list(observation.group_ids)),
-                        observation.status.value,
-                        int(observation.schedulable),
-                        int(observation.expired),
-                        int(observation.temporary_unavailable),
-                        int(observation.automatic_pause),
-                        _iso(observed_at),
-                    ),
+                    ") VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9) "
+                    "ON CONFLICT(snapshot_id, account_id) DO NOTHING",
+                    normalized_snapshot_id,
+                    observation.account_id,
+                    _json(list(observation.group_ids)),
+                    observation.status.value,
+                    observation.schedulable,
+                    observation.expired,
+                    observation.temporary_unavailable,
+                    observation.automatic_pause,
+                    observed_at,
                 )
                 inserted += 1
-            connection.execute("COMMIT")
-        except Exception:
-            if connection.in_transaction:
-                connection.execute("ROLLBACK")
-            raise
-        finally:
-            connection.close()
         return inserted
 
     @staticmethod
-    def _normalize_account_observation_sync(
-        connection: sqlite3.Connection,
+    async def _normalize_account_observation_sync(
+        connection: Any,
         observation: GuardianAccountObservation,
         *,
         snapshot_id: str,
@@ -1209,13 +772,14 @@ class GuardianRepository:
             or observation.automatic_pause
         ):
             return observation
-        row = connection.execute(
+        row = await connection.fetchrow(
             "SELECT status, automatic_pause, observed_at "
             "FROM guardian_account_observations "
-            "WHERE account_id = ? AND snapshot_id <> ? "
+            "WHERE account_id = $1 AND snapshot_id <> $2 "
             "ORDER BY observed_at DESC, snapshot_id DESC LIMIT 1",
-            (observation.account_id, snapshot_id),
-        ).fetchone()
+            observation.account_id,
+            snapshot_id,
+        )
         if row is None:
             return observation
         previous_at = _dt(row["observed_at"])
@@ -1236,29 +800,17 @@ class GuardianRepository:
         self,
         snapshot_id: str,
     ) -> list[GuardianAccountObservation]:
-        return await asyncio.to_thread(
-            self._list_account_observations_sync,
-            snapshot_id,
-        )
-
-    def _list_account_observations_sync(
-        self,
-        snapshot_id: str,
-    ) -> list[GuardianAccountObservation]:
-        with self._connect() as connection:
-            rows = connection.execute(
-                "SELECT * FROM guardian_account_observations WHERE snapshot_id = ? "
+        async with self._database.acquire() as connection:
+            rows = await connection.fetch(
+                "SELECT * FROM guardian_account_observations WHERE snapshot_id = $1 "
                 "ORDER BY CAST(account_id AS INTEGER)",
-                (_snapshot_id(snapshot_id),),
-            ).fetchall()
+                _snapshot_id(snapshot_id),
+            )
         return [self._account_observation_from_row(row) for row in rows]
 
     async def latest_abnormal_account_snapshot(self) -> str | None:
-        return await asyncio.to_thread(self._latest_abnormal_account_snapshot_sync)
-
-    def _latest_abnormal_account_snapshot_sync(self) -> str | None:
-        with self._connect() as connection:
-            row = connection.execute(
+        async with self._database.acquire() as connection:
+            row = await connection.fetchrow(
                 "WITH latest AS ("
                 "SELECT snapshot_id FROM guardian_account_observations "
                 "ORDER BY observed_at DESC, snapshot_id DESC LIMIT 1"
@@ -1266,34 +818,19 @@ class GuardianRepository:
                 "FROM guardian_account_observations AS observations "
                 "JOIN latest ON latest.snapshot_id = observations.snapshot_id "
                 "WHERE ((observations.status IN ('error', 'disabled', 'inactive') "
-                "AND observations.expired = 0 "
-                "AND observations.temporary_unavailable = 0) "
+                "AND observations.expired = FALSE "
+                "AND observations.temporary_unavailable = FALSE) "
                 "OR (observations.status = 'active' "
-                "AND observations.schedulable = 0 "
-                "AND observations.automatic_pause = 1 "
-                "AND observations.expired = 0 "
-                "AND observations.temporary_unavailable = 0)) LIMIT 1"
-            ).fetchone()
+                "AND observations.schedulable = FALSE "
+                "AND observations.automatic_pause = TRUE "
+                "AND observations.expired = FALSE "
+                "AND observations.temporary_unavailable = FALSE)) LIMIT 1"
+            )
         return cast(str, row["snapshot_id"]) if row is not None else None
 
     async def open_channel_error_episode(
         self,
         *,
-        channel_id: str,
-        group_id: str | None,
-        snapshot_id: str,
-        opened_at: datetime,
-    ) -> GuardianChannelErrorEpisode:
-        return await asyncio.to_thread(
-            self._open_channel_error_episode_sync,
-            channel_id,
-            group_id,
-            snapshot_id,
-            opened_at,
-        )
-
-    def _open_channel_error_episode_sync(
-        self,
         channel_id: str,
         group_id: str | None,
         snapshot_id: str,
@@ -1308,76 +845,64 @@ class GuardianRepository:
         if opened_at.tzinfo is None:
             raise ValueError("episode opened_at must be timezone-aware")
         normalized_snapshot_id = _snapshot_id(snapshot_id)
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            existing = connection.execute(
-                "SELECT * FROM guardian_channel_error_episodes "
-                "WHERE channel_id = ? AND status = 'OPEN'",
-                (channel_id,),
-            ).fetchone()
-            if existing is not None:
-                episode = self._channel_error_episode_from_row(existing)
-                if episode.group_id != group_id:
-                    raise ServiceError(
-                        "CHANNEL_ERROR_EPISODE_CONFLICT",
-                        "The open channel error episode has a different group mapping",
-                    )
-                connection.execute("COMMIT")
-                return episode
-            episode_id = str(uuid.uuid4())
-            now = _iso(self._clock())
-            connection.execute(
+        episode_id = str(uuid.uuid4())
+        now = self._clock()
+        # The partial unique index on an OPEN episode per channel is the real
+        # guard; ON CONFLICT DO NOTHING makes a concurrent second writer fall
+        # through to the read below instead of raising.
+        async with self._database.transaction() as connection:
+            await connection.execute(
                 "INSERT INTO guardian_channel_error_episodes("
                 "episode_id, channel_id, group_id, opened_snapshot_id, status, "
                 "opened_at, closed_at, updated_at"
-                ") VALUES(?, ?, ?, ?, 'OPEN', ?, NULL, ?)",
-                (
-                    episode_id,
-                    channel_id,
-                    group_id,
-                    normalized_snapshot_id,
-                    _iso(opened_at),
-                    now,
-                ),
+                ") VALUES($1, $2, $3, $4, 'OPEN', $5, NULL, $6) "
+                "ON CONFLICT DO NOTHING",
+                episode_id,
+                channel_id,
+                group_id,
+                normalized_snapshot_id,
+                opened_at,
+                now,
             )
-            row = connection.execute(
-                "SELECT * FROM guardian_channel_error_episodes WHERE episode_id = ?",
-                (episode_id,),
-            ).fetchone()
-            connection.execute("COMMIT")
-        except Exception:
-            if connection.in_transaction:
-                connection.execute("ROLLBACK")
-            raise
-        finally:
-            connection.close()
-        assert row is not None
-        return self._channel_error_episode_from_row(row)
+            row = await connection.fetchrow(
+                "SELECT * FROM guardian_channel_error_episodes "
+                "WHERE channel_id = $1 AND status = 'OPEN'",
+                channel_id,
+            )
+        if row is None:
+            raise ServiceError(
+                "CHANNEL_ERROR_EPISODE_CONFLICT",
+                "The open channel error episode could not be read back",
+            )
+        episode = self._channel_error_episode_from_row(row)
+        if episode.group_id != group_id:
+            raise ServiceError(
+                "CHANNEL_ERROR_EPISODE_CONFLICT",
+                "The open channel error episode has a different group mapping",
+            )
+        return episode
 
     async def get_open_channel_error_episode(
         self,
         channel_id: str,
     ) -> GuardianChannelErrorEpisode | None:
-        return await asyncio.to_thread(
-            self._get_open_channel_error_episode_sync,
-            channel_id,
-        )
+        async with self._database.acquire() as connection:
+            row = await connection.fetchrow(
+                "SELECT * FROM guardian_channel_error_episodes "
+                "WHERE channel_id = $1 AND status = 'OPEN'",
+                channel_id,
+            )
+        return self._channel_error_episode_from_row(row) if row is not None else None
 
     async def latest_open_channel_error_episode(
         self,
     ) -> GuardianChannelErrorEpisode | None:
-        return await asyncio.to_thread(self._latest_open_channel_error_episode_sync)
-
-    def _latest_open_channel_error_episode_sync(
-        self,
-    ) -> GuardianChannelErrorEpisode | None:
-        with self._connect() as connection:
-            row = connection.execute(
+        async with self._database.acquire() as connection:
+            row = await connection.fetchrow(
                 "SELECT * FROM guardian_channel_error_episodes "
                 "WHERE status = 'OPEN' "
                 "ORDER BY opened_at DESC, episode_id DESC LIMIT 1"
-            ).fetchone()
+            )
         return self._channel_error_episode_from_row(row) if row is not None else None
 
     async def list_open_channel_error_episodes(
@@ -1385,37 +910,16 @@ class GuardianRepository:
         *,
         limit: int = 20,
     ) -> list[GuardianChannelErrorEpisode]:
-        return await asyncio.to_thread(
-            self._list_open_channel_error_episodes_sync,
-            limit,
-        )
-
-    def _list_open_channel_error_episodes_sync(
-        self,
-        limit: int,
-    ) -> list[GuardianChannelErrorEpisode]:
         if not 1 <= limit <= 100:
             raise ValueError("open episode limit must be between 1 and 100")
-        with self._connect() as connection:
-            rows = connection.execute(
+        async with self._database.acquire() as connection:
+            rows = await connection.fetch(
                 "SELECT * FROM guardian_channel_error_episodes "
                 "WHERE status = 'OPEN' "
-                "ORDER BY opened_at DESC, episode_id DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
+                "ORDER BY opened_at DESC, episode_id DESC LIMIT $1",
+                limit,
+            )
         return [self._channel_error_episode_from_row(row) for row in rows]
-
-    def _get_open_channel_error_episode_sync(
-        self,
-        channel_id: str,
-    ) -> GuardianChannelErrorEpisode | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM guardian_channel_error_episodes "
-                "WHERE channel_id = ? AND status = 'OPEN'",
-                (channel_id,),
-            ).fetchone()
-        return self._channel_error_episode_from_row(row) if row is not None else None
 
     async def close_channel_error_episode(
         self,
@@ -1423,50 +927,22 @@ class GuardianRepository:
         *,
         closed_at: datetime,
     ) -> bool:
-        return await asyncio.to_thread(
-            self._close_channel_error_episode_sync,
-            channel_id,
-            closed_at,
-        )
-
-    def _close_channel_error_episode_sync(
-        self,
-        channel_id: str,
-        closed_at: datetime,
-    ) -> bool:
         if closed_at.tzinfo is None:
             raise ValueError("episode closed_at must be timezone-aware")
-        with self._connect() as connection:
-            result = connection.execute(
+        async with self._database.acquire() as connection:
+            status = await connection.execute(
                 "UPDATE guardian_channel_error_episodes SET status = 'CLOSED', "
-                "closed_at = ?, updated_at = ? "
-                "WHERE channel_id = ? AND status = 'OPEN'",
-                (_iso(closed_at), _iso(self._clock()), channel_id),
+                "closed_at = $1, updated_at = $2 "
+                "WHERE channel_id = $3 AND status = 'OPEN'",
+                closed_at,
+                self._clock(),
+                channel_id,
             )
-        return result.rowcount == 1
+        return _rowcount(status) == 1
 
     async def create_account_recovery_run(
         self,
         *,
-        dedup_key: str,
-        trigger: AccountRecoveryRunTrigger,
-        snapshot_id: str | None,
-        episode_id: str | None,
-        policy_revision: int,
-        started_at: datetime,
-    ) -> GuardianAccountRecoveryRun:
-        return await asyncio.to_thread(
-            self._create_account_recovery_run_sync,
-            dedup_key,
-            trigger,
-            snapshot_id,
-            episode_id,
-            policy_revision,
-            started_at,
-        )
-
-    def _create_account_recovery_run_sync(
-        self,
         dedup_key: str,
         trigger: AccountRecoveryRunTrigger,
         snapshot_id: str | None,
@@ -1483,45 +959,32 @@ class GuardianRepository:
             raise ValueError("policy revision must be positive")
         if started_at.tzinfo is None:
             raise ValueError("account recovery start time must be timezone-aware")
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            existing = connection.execute(
-                "SELECT * FROM guardian_account_recovery_runs WHERE dedup_key = ?",
-                (dedup_key,),
-            ).fetchone()
-            if existing is not None:
-                connection.execute("COMMIT")
-                return self._account_recovery_run_from_row(existing)
-            run_id = str(uuid.uuid4())
-            connection.execute(
+        run_id = str(uuid.uuid4())
+        # The UNIQUE constraint on dedup_key replaces the read-then-insert the
+        # SQLite version performed under a write lock: a concurrent creator
+        # inserts nothing and the SELECT below returns the winner's row.
+        async with self._database.transaction() as connection:
+            await connection.execute(
                 "INSERT INTO guardian_account_recovery_runs("
                 "run_id, dedup_key, trigger, snapshot_id, episode_id, policy_revision, "
                 "status, result_json, started_at, finished_at, updated_at"
-                ") VALUES(?, ?, ?, ?, ?, ?, 'RUNNING', NULL, ?, NULL, ?)",
-                (
-                    run_id,
-                    dedup_key,
-                    trigger.value,
-                    normalized_snapshot_id,
-                    episode_id,
-                    policy_revision,
-                    _iso(started_at),
-                    _iso(self._clock()),
-                ),
+                ") VALUES($1, $2, $3, $4, $5, $6, 'RUNNING', NULL, $7, NULL, $8) "
+                "ON CONFLICT(dedup_key) DO NOTHING",
+                run_id,
+                dedup_key,
+                trigger.value,
+                normalized_snapshot_id,
+                episode_id,
+                policy_revision,
+                started_at,
+                self._clock(),
             )
-            row = connection.execute(
-                "SELECT * FROM guardian_account_recovery_runs WHERE run_id = ?",
-                (run_id,),
-            ).fetchone()
-            connection.execute("COMMIT")
-        except Exception:
-            if connection.in_transaction:
-                connection.execute("ROLLBACK")
-            raise
-        finally:
-            connection.close()
-        assert row is not None
+            row = await connection.fetchrow(
+                "SELECT * FROM guardian_account_recovery_runs WHERE dedup_key = $1",
+                dedup_key,
+            )
+        if row is None:
+            raise RuntimeError("account recovery run could not be created")
         return self._account_recovery_run_from_row(row)
 
     async def finish_account_recovery_run(
@@ -1532,33 +995,18 @@ class GuardianRepository:
         result: dict[str, int],
         finished_at: datetime,
     ) -> GuardianAccountRecoveryRun:
-        return await asyncio.to_thread(
-            self._finish_account_recovery_run_sync,
-            run_id,
-            status,
-            result,
-            finished_at,
-        )
-
-    def _finish_account_recovery_run_sync(
-        self,
-        run_id: str,
-        status: str,
-        result: dict[str, int],
-        finished_at: datetime,
-    ) -> GuardianAccountRecoveryRun:
         parsed_status = AccountRecoveryRunStatus(status)
         if parsed_status is AccountRecoveryRunStatus.RUNNING:
             raise ValueError("a finished account recovery run cannot remain running")
         if finished_at.tzinfo is None:
             raise ValueError("account recovery finish time must be timezone-aware")
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            existing = connection.execute(
-                "SELECT * FROM guardian_account_recovery_runs WHERE run_id = ?",
-                (run_id,),
-            ).fetchone()
+        # ``FOR UPDATE`` serializes two finishers on the same run, which the
+        # SQLite write lock provided implicitly.
+        async with self._database.transaction() as connection:
+            existing = await connection.fetchrow(
+                "SELECT * FROM guardian_account_recovery_runs WHERE run_id = $1 FOR UPDATE",
+                run_id,
+            )
             if existing is None:
                 raise ServiceError(
                     "ACCOUNT_RECOVERY_RUN_NOT_FOUND",
@@ -1567,126 +1015,68 @@ class GuardianRepository:
             current = self._account_recovery_run_from_row(existing)
             if current.status is not AccountRecoveryRunStatus.RUNNING:
                 if current.status is parsed_status and current.result == result:
-                    connection.execute("COMMIT")
                     return current
                 raise ServiceError(
                     "ACCOUNT_RECOVERY_RUN_CONFLICT",
                     "The account recovery run is already complete",
                 )
-            connection.execute(
-                "UPDATE guardian_account_recovery_runs SET status = ?, result_json = ?, "
-                "finished_at = ?, updated_at = ? WHERE run_id = ?",
-                (
-                    parsed_status.value,
-                    _json(result),
-                    _iso(finished_at),
-                    _iso(self._clock()),
-                    run_id,
-                ),
+            await connection.execute(
+                "UPDATE guardian_account_recovery_runs SET status = $1, result_json = $2, "
+                "finished_at = $3, updated_at = $4 WHERE run_id = $5",
+                parsed_status.value,
+                _json(result),
+                finished_at,
+                self._clock(),
+                run_id,
             )
-            row = connection.execute(
-                "SELECT * FROM guardian_account_recovery_runs WHERE run_id = ?",
-                (run_id,),
-            ).fetchone()
-            connection.execute("COMMIT")
-        except Exception:
-            if connection.in_transaction:
-                connection.execute("ROLLBACK")
-            raise
-        finally:
-            connection.close()
-        assert row is not None
+            row = await connection.fetchrow(
+                "SELECT * FROM guardian_account_recovery_runs WHERE run_id = $1",
+                run_id,
+            )
+        if row is None:
+            raise RuntimeError("account recovery run disappeared while finishing")
         return self._account_recovery_run_from_row(row)
 
     async def get_account_recovery_run(
         self,
         run_id: str,
     ) -> GuardianAccountRecoveryRun | None:
-        return await asyncio.to_thread(self._get_account_recovery_run_sync, run_id)
-
-    def _get_account_recovery_run_sync(
-        self,
-        run_id: str,
-    ) -> GuardianAccountRecoveryRun | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM guardian_account_recovery_runs WHERE run_id = ?",
-                (run_id,),
-            ).fetchone()
+        async with self._database.acquire() as connection:
+            row = await connection.fetchrow(
+                "SELECT * FROM guardian_account_recovery_runs WHERE run_id = $1",
+                run_id,
+            )
         return self._account_recovery_run_from_row(row) if row is not None else None
 
     async def list_account_recovery_runs(
-        self,
-        *,
-        limit: int = 20,
-    ) -> list[GuardianAccountRecoveryRun]:
-        return await asyncio.to_thread(self._list_account_recovery_runs_sync, limit)
-
-    def _list_account_recovery_runs_sync(
         self,
         limit: int,
     ) -> list[GuardianAccountRecoveryRun]:
         if not 1 <= limit <= 100:
             raise ValueError("account recovery run limit must be between 1 and 100")
-        with self._connect() as connection:
-            rows = connection.execute(
+        async with self._database.acquire() as connection:
+            rows = await connection.fetch(
                 "SELECT * FROM guardian_account_recovery_runs "
-                "ORDER BY started_at DESC, run_id DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
+                "ORDER BY started_at DESC, run_id DESC LIMIT $1",
+                limit,
+            )
         return [self._account_recovery_run_from_row(row) for row in rows]
 
     async def latest_account_recovery_run(
         self,
         trigger: AccountRecoveryRunTrigger,
     ) -> GuardianAccountRecoveryRun | None:
-        return await asyncio.to_thread(
-            self._latest_account_recovery_run_sync,
-            trigger,
-        )
-
-    def _latest_account_recovery_run_sync(
-        self,
-        trigger: AccountRecoveryRunTrigger,
-    ) -> GuardianAccountRecoveryRun | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM guardian_account_recovery_runs WHERE trigger = ? "
+        async with self._database.acquire() as connection:
+            row = await connection.fetchrow(
+                "SELECT * FROM guardian_account_recovery_runs WHERE trigger = $1 "
                 "ORDER BY started_at DESC, run_id DESC LIMIT 1",
-                (trigger.value,),
-            ).fetchone()
+                trigger.value,
+            )
         return self._account_recovery_run_from_row(row) if row is not None else None
 
     async def record_account_recovery_result(
         self,
         *,
-        run_id: str,
-        dedup_key: str,
-        account_id: str,
-        channel_id: str | None,
-        group_id: str | None,
-        classification: AccountRecoveryClassification,
-        result: AccountRecoveryResult,
-        reason: str,
-        tested: bool,
-        occurred_at: datetime,
-    ) -> bool:
-        return await asyncio.to_thread(
-            self._record_account_recovery_result_sync,
-            run_id,
-            dedup_key,
-            account_id,
-            channel_id,
-            group_id,
-            classification,
-            result,
-            reason,
-            tested,
-            occurred_at,
-        )
-
-    def _record_account_recovery_result_sync(
-        self,
         run_id: str,
         dedup_key: str,
         account_id: str,
@@ -1711,13 +1101,13 @@ class GuardianRepository:
             tested=tested,
             occurred_at=occurred_at,
         )
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            existing = connection.execute(
-                "SELECT * FROM guardian_account_recovery_ledger WHERE dedup_key = ?",
-                (dedup_key,),
-            ).fetchone()
+        # The UNIQUE ledger dedup key makes the insert idempotent; a duplicate
+        # writes nothing and is compared against the stored row below.
+        async with self._database.transaction() as connection:
+            existing = await connection.fetchrow(
+                "SELECT * FROM guardian_account_recovery_ledger WHERE dedup_key = $1",
+                dedup_key,
+            )
             if existing is not None:
                 stored = self._account_recovery_record_from_row(existing)
                 if stored.model_dump(exclude={"ledger_id"}) != record.model_dump(
@@ -1727,163 +1117,117 @@ class GuardianRepository:
                         "ACCOUNT_RECOVERY_RESULT_CONFLICT",
                         "The account recovery result changed for the same operation",
                     )
-                connection.execute("COMMIT")
                 return False
-            run = connection.execute(
-                "SELECT 1 FROM guardian_account_recovery_runs WHERE run_id = ?",
-                (run_id,),
-            ).fetchone()
+            run = await connection.fetchrow(
+                "SELECT 1 FROM guardian_account_recovery_runs WHERE run_id = $1",
+                run_id,
+            )
             if run is None:
                 raise ServiceError(
                     "ACCOUNT_RECOVERY_RUN_NOT_FOUND",
                     "The account recovery run does not exist",
                 )
-            connection.execute(
+            await connection.execute(
                 "INSERT INTO guardian_account_recovery_ledger("
                 "ledger_id, run_id, dedup_key, account_id, channel_id, group_id, "
                 "classification, result, reason, tested, occurred_at"
-                ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    record.ledger_id,
-                    record.run_id,
-                    record.dedup_key,
-                    record.account_id,
-                    record.channel_id,
-                    record.group_id,
-                    record.classification.value,
-                    record.result.value,
-                    record.reason,
-                    int(record.tested),
-                    _iso(record.occurred_at),
-                ),
+                ") VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) "
+                "ON CONFLICT(dedup_key) DO NOTHING",
+                record.ledger_id,
+                record.run_id,
+                record.dedup_key,
+                record.account_id,
+                record.channel_id,
+                record.group_id,
+                record.classification.value,
+                record.result.value,
+                record.reason,
+                record.tested,
+                record.occurred_at,
             )
-            connection.execute("COMMIT")
-        except Exception:
-            if connection.in_transaction:
-                connection.execute("ROLLBACK")
-            raise
-        finally:
-            connection.close()
         return True
 
     async def list_account_recovery_results(
         self,
         run_id: str,
     ) -> list[GuardianAccountRecoveryRecord]:
-        return await asyncio.to_thread(
-            self._list_account_recovery_results_sync,
-            run_id,
-        )
-
-    def _list_account_recovery_results_sync(
-        self,
-        run_id: str,
-    ) -> list[GuardianAccountRecoveryRecord]:
-        with self._connect() as connection:
-            rows = connection.execute(
-                "SELECT * FROM guardian_account_recovery_ledger WHERE run_id = ? "
+        async with self._database.acquire() as connection:
+            rows = await connection.fetch(
+                "SELECT * FROM guardian_account_recovery_ledger WHERE run_id = $1 "
                 "ORDER BY occurred_at, ledger_id",
-                (run_id,),
-            ).fetchall()
+                run_id,
+            )
         return [self._account_recovery_record_from_row(row) for row in rows]
 
     async def list_recent_tested_account_ids(
         self,
-        *,
         since: datetime,
     ) -> frozenset[str]:
-        if since.tzinfo is None:
-            raise ValueError("recent account recovery cutoff must be timezone-aware")
-        return await asyncio.to_thread(
-            self._list_recent_tested_account_ids_sync,
-            since,
-        )
-
-    def _list_recent_tested_account_ids_sync(
-        self,
-        since: datetime,
-    ) -> frozenset[str]:
-        with self._connect() as connection:
-            rows = connection.execute(
+        async with self._database.acquire() as connection:
+            rows = await connection.fetch(
                 "SELECT DISTINCT account_id FROM guardian_account_recovery_ledger "
-                "WHERE tested = 1 AND occurred_at >= ? ORDER BY account_id",
-                (_iso(since),),
-            ).fetchall()
+                "WHERE tested AND occurred_at >= $1 ORDER BY account_id",
+                since,
+            )
         return frozenset(str(row["account_id"]) for row in rows)
 
     async def update_policy(
         self, policy: GuardianPolicy, *, expected_revision: int
     ) -> GuardianPolicy:
-        return await asyncio.to_thread(self._update_policy_sync, policy, expected_revision)
-
-    def _update_policy_sync(self, policy: GuardianPolicy, expected_revision: int) -> GuardianPolicy:
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                "SELECT revision FROM guardian_policy WHERE singleton = 1"
-            ).fetchone()
+        # ``FOR UPDATE`` keeps the revision check and the write atomic against
+        # a concurrent PATCH, matching SQLite's serialized write lock.
+        async with self._database.transaction() as connection:
+            row = await connection.fetchrow(
+                "SELECT revision FROM guardian_policy WHERE singleton = 1 FOR UPDATE"
+            )
             if row is None:
                 raise RuntimeError("Guardian repository has not been initialized")
             if int(row["revision"]) != expected_revision:
-                connection.execute("ROLLBACK")
                 raise ServiceError(
                     "POLICY_REVISION_CONFLICT",
                     "The Guardian policy was modified by another session",
                 )
             saved = policy.model_copy(update={"revision": expected_revision + 1})
-            connection.execute(
-                "UPDATE guardian_policy SET policy_json = ?, revision = ?, updated_at = ? "
+            await connection.execute(
+                "UPDATE guardian_policy SET policy_json = $1, revision = $2, updated_at = $3 "
                 "WHERE singleton = 1",
-                (saved.model_dump_json(), saved.revision, _iso(self._clock())),
+                saved.model_dump_json(),
+                saved.revision,
+                self._clock(),
             )
-            connection.execute("COMMIT")
-            return saved
-        except ServiceError:
-            raise
-        except Exception:
-            connection.execute("ROLLBACK")
-            raise
-        finally:
-            connection.close()
+        return saved
 
     async def upsert_group_override(self, group_id: str, policy: dict[str, Any]) -> dict[str, Any]:
-        return await asyncio.to_thread(self._upsert_group_override_sync, group_id, policy)
-
-    def _upsert_group_override_sync(self, group_id: str, policy: dict[str, Any]) -> dict[str, Any]:
-        now = _iso(self._clock())
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT revision FROM guardian_group_overrides WHERE group_id = ?",
-                (group_id,),
-            ).fetchone()
+        now = self._clock()
+        async with self._database.acquire() as connection:
+            row = await connection.fetchrow(
+                "SELECT revision FROM guardian_group_overrides WHERE group_id = $1",
+                group_id,
+            )
             revision = int(row["revision"]) + 1 if row is not None else 1
-            connection.execute(
+            await connection.execute(
                 "INSERT INTO guardian_group_overrides"
-                "(group_id, policy_json, revision, updated_at) VALUES(?, ?, ?, ?) "
+                "(group_id, policy_json, revision, updated_at) VALUES($1, $2, $3, $4) "
                 "ON CONFLICT(group_id) DO UPDATE SET policy_json = excluded.policy_json, "
                 "revision = excluded.revision, updated_at = excluded.updated_at",
-                (group_id, _json(policy), revision, now),
+                group_id,
+                _json(policy),
+                revision,
+                now,
             )
         return {"group_id": group_id, "policy": policy, "revision": revision, "updated_at": now}
 
     async def delete_group_override(self, group_id: str) -> None:
-        await asyncio.to_thread(self._delete_group_override_sync, group_id)
-
-    def _delete_group_override_sync(self, group_id: str) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                "DELETE FROM guardian_group_overrides WHERE group_id = ?", (group_id,)
+        async with self._database.acquire() as connection:
+            await connection.execute(
+                "DELETE FROM guardian_group_overrides WHERE group_id = $1", group_id
             )
 
     async def list_group_overrides(self) -> dict[str, dict[str, Any]]:
-        return await asyncio.to_thread(self._list_group_overrides_sync)
-
-    def _list_group_overrides_sync(self) -> dict[str, dict[str, Any]]:
-        with self._connect() as connection:
-            rows = connection.execute(
+        async with self._database.acquire() as connection:
+            rows = await connection.fetch(
                 "SELECT * FROM guardian_group_overrides ORDER BY group_id"
-            ).fetchall()
+            )
         return {
             row["group_id"]: {
                 "policy": json.loads(row["policy_json"]),
@@ -1896,36 +1240,31 @@ class GuardianRepository:
     async def upsert_channel_override(
         self, channel_id: str, override: ChannelPolicyOverride
     ) -> ChannelPolicyOverride:
-        return await asyncio.to_thread(self._upsert_channel_override_sync, channel_id, override)
-
-    def _upsert_channel_override_sync(
-        self, channel_id: str, override: ChannelPolicyOverride
-    ) -> ChannelPolicyOverride:
-        now = _iso(self._clock())
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT revision FROM guardian_channel_overrides WHERE channel_id = ?",
-                (channel_id,),
-            ).fetchone()
+        now = self._clock()
+        async with self._database.acquire() as connection:
+            row = await connection.fetchrow(
+                "SELECT revision FROM guardian_channel_overrides WHERE channel_id = $1",
+                channel_id,
+            )
             revision = int(row["revision"]) + 1 if row is not None else 1
-            connection.execute(
+            await connection.execute(
                 "INSERT INTO guardian_channel_overrides"
-                "(channel_id, override_json, revision, updated_at) VALUES(?, ?, ?, ?) "
+                "(channel_id, override_json, revision, updated_at) VALUES($1, $2, $3, $4) "
                 "ON CONFLICT(channel_id) DO UPDATE SET override_json = excluded.override_json, "
                 "revision = excluded.revision, updated_at = excluded.updated_at",
-                (channel_id, override.model_dump_json(), revision, now),
+                channel_id,
+                override.model_dump_json(),
+                revision,
+                now,
             )
         return override
 
     async def get_channel_override(self, channel_id: str) -> ChannelPolicyOverride | None:
-        return await asyncio.to_thread(self._get_channel_override_sync, channel_id)
-
-    def _get_channel_override_sync(self, channel_id: str) -> ChannelPolicyOverride | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT override_json FROM guardian_channel_overrides WHERE channel_id = ?",
-                (channel_id,),
-            ).fetchone()
+        async with self._database.acquire() as connection:
+            row = await connection.fetchrow(
+                "SELECT override_json FROM guardian_channel_overrides WHERE channel_id = $1",
+                channel_id,
+            )
         return (
             ChannelPolicyOverride.model_validate_json(row["override_json"])
             if row is not None
@@ -1933,46 +1272,6 @@ class GuardianRepository:
         )
 
     async def upsert_channel(
-        self,
-        *,
-        channel_id: str,
-        name: str,
-        group_id: str | None,
-        upstream_status: str,
-        upstream_schedulable: bool,
-        health: GuardianHealth,
-        score: float,
-        latency_ms: int | None,
-        desired_schedulable: bool,
-        manual_control: ManualControl,
-        details: dict[str, Any],
-        seen_at: datetime,
-        confidence: float = 0,
-        freshness_state: GuardianFreshness = GuardianFreshness.EXPIRED,
-        last_evidence_at: datetime | None = None,
-        warmup_buckets: int = 0,
-    ) -> dict[str, Any]:
-        return await asyncio.to_thread(
-            self._upsert_channel_sync,
-            channel_id,
-            name,
-            group_id,
-            upstream_status,
-            upstream_schedulable,
-            health,
-            score,
-            latency_ms,
-            desired_schedulable,
-            manual_control,
-            details,
-            seen_at,
-            confidence,
-            freshness_state,
-            last_evidence_at,
-            warmup_buckets,
-        )
-
-    def _upsert_channel_sync(
         self,
         channel_id: str,
         name: str,
@@ -1991,20 +1290,21 @@ class GuardianRepository:
         last_evidence_at: datetime | None,
         warmup_buckets: int,
     ) -> dict[str, Any]:
-        now = _iso(self._clock())
-        seen = _iso(seen_at)
-        with self._connect() as connection:
-            existing = connection.execute(
-                "SELECT first_seen_at FROM guardian_channels WHERE channel_id = ?",
-                (channel_id,),
-            ).fetchone()
+        now = self._clock()
+        seen = seen_at
+        async with self._database.acquire() as connection:
+            existing = await connection.fetchrow(
+                "SELECT first_seen_at FROM guardian_channels WHERE channel_id = $1",
+                channel_id,
+            )
             first_seen = existing["first_seen_at"] if existing is not None else seen
-            connection.execute(
+            await connection.execute(
                 "INSERT INTO guardian_channels(channel_id, name, group_id, upstream_status, "
                 "upstream_schedulable, health, score, latency_ms, desired_schedulable, "
                 "manual_control, details_json, confidence, freshness_state, "
                 "last_evidence_at, warmup_buckets, first_seen_at, last_seen_at, updated_at) "
-                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, "
+                "$15, $16, $17, $18) "
                 "ON CONFLICT(channel_id) DO UPDATE SET name = excluded.name, "
                 "group_id = excluded.group_id, upstream_status = excluded.upstream_status, "
                 "upstream_schedulable = excluded.upstream_schedulable, health = excluded.health, "
@@ -2016,60 +1316,42 @@ class GuardianRepository:
                 "last_evidence_at = excluded.last_evidence_at, "
                 "warmup_buckets = excluded.warmup_buckets, "
                 "last_seen_at = excluded.last_seen_at, updated_at = excluded.updated_at",
-                (
-                    channel_id,
-                    name,
-                    group_id,
-                    upstream_status,
-                    int(upstream_schedulable),
-                    health.value,
-                    score,
-                    latency_ms,
-                    int(desired_schedulable),
-                    manual_control.value,
-                    _json(details),
-                    confidence,
-                    freshness_state.value,
-                    _iso(last_evidence_at) if last_evidence_at is not None else None,
-                    warmup_buckets,
-                    first_seen,
-                    seen,
-                    now,
-                ),
+                channel_id,
+                name,
+                group_id,
+                upstream_status,
+                upstream_schedulable,
+                health.value,
+                score,
+                latency_ms,
+                desired_schedulable,
+                manual_control.value,
+                _json(details),
+                confidence,
+                freshness_state.value,
+                last_evidence_at if last_evidence_at is not None else None,
+                warmup_buckets,
+                first_seen,
+                seen,
+                now,
             )
-            row = connection.execute(
-                "SELECT * FROM guardian_channels WHERE channel_id = ?", (channel_id,)
-            ).fetchone()
+            row = await connection.fetchrow(
+                "SELECT * FROM guardian_channels WHERE channel_id = $1", channel_id
+            )
         assert row is not None
         return self._channel(row)
 
     async def get_channel(self, channel_id: str) -> dict[str, Any] | None:
-        return await asyncio.to_thread(self._get_channel_sync, channel_id)
-
-    def _get_channel_sync(self, channel_id: str) -> dict[str, Any] | None:
-        with self._connect() as connection:
-            row = connection.execute(
+        async with self._database.acquire() as connection:
+            row = await connection.fetchrow(
                 "SELECT c.*, o.override_json AS channel_override_json "
                 "FROM guardian_channels c LEFT JOIN guardian_channel_overrides o "
-                "ON o.channel_id = c.channel_id WHERE c.channel_id = ?",
-                (channel_id,),
-            ).fetchone()
+                "ON o.channel_id = c.channel_id WHERE c.channel_id = $1",
+                channel_id,
+            )
         return self._channel(row) if row is not None else None
 
     async def list_channels(
-        self,
-        *,
-        limit: int = 100,
-        cursor: str | None = None,
-        group_id: str | None = None,
-        health: str | None = None,
-        query: str | None = None,
-    ) -> dict[str, Any]:
-        return await asyncio.to_thread(
-            self._list_channels_sync, limit, cursor, group_id, health, query
-        )
-
-    def _list_channels_sync(
         self,
         limit: int,
         cursor: str | None,
@@ -2082,29 +1364,31 @@ class GuardianRepository:
         conditions: list[str] = ["c.removed_at IS NULL"]
         params: list[object] = []
         if group_id:
-            conditions.append("c.group_id = ?")
             params.append(group_id)
+            conditions.append(f"c.group_id = ${len(params)}")
         if health:
-            conditions.append("c.health = ?")
             params.append(health)
+            conditions.append(f"c.health = ${len(params)}")
         if query:
-            conditions.append("(c.name LIKE ? OR c.channel_id LIKE ?)")
             pattern = f"%{query[:100]}%"
             params.extend((pattern, pattern))
+            conditions.append(
+                f"(c.name LIKE ${len(params) - 1} OR c.channel_id LIKE ${len(params)})"
+            )
         if cursor:
             channel_cursor, _ = _decode_cursor(cursor)
-            conditions.append("c.channel_id > ?")
             params.append(channel_cursor)
+            conditions.append(f"c.channel_id > ${len(params)}")
         where = "WHERE " + " AND ".join(conditions) if conditions else ""
         params.append(limit + 1)
-        with self._connect() as connection:
-            rows = connection.execute(
+        async with self._database.acquire() as connection:
+            rows = await connection.fetch(
                 "SELECT c.*, o.override_json AS channel_override_json "
                 "FROM guardian_channels c LEFT JOIN guardian_channel_overrides o "
                 f"ON o.channel_id = c.channel_id {where} "
-                "ORDER BY c.channel_id LIMIT ?",
-                params,
-            ).fetchall()
+                f"ORDER BY c.channel_id LIMIT ${len(params)}",
+                *params,
+            )
         selected = rows[:limit]
         next_cursor = (
             _cursor(selected[-1]["channel_id"], selected[-1]["channel_id"])
@@ -2119,64 +1403,49 @@ class GuardianRepository:
     async def reconcile_channels(
         self,
         live_channel_ids: set[str] | frozenset[str],
-        *,
-        removed_at: datetime,
-    ) -> None:
-        """Flag channels that disappeared upstream and restore reappearing ones."""
-        await asyncio.to_thread(
-            self._reconcile_channels_sync, live_channel_ids, removed_at
-        )
-
-    def _reconcile_channels_sync(
-        self,
-        live_channel_ids: set[str] | frozenset[str],
         removed_at: datetime,
     ) -> None:
         ids = {str(channel_id) for channel_id in live_channel_ids}
-        now = _iso(removed_at)
-        with self._connect() as connection:
+        removed_at_value = removed_at
+        async with self._database.acquire() as connection:
             if ids:
-                placeholders = ",".join("?" for _ in ids)
-                connection.execute(
+                ordered = sorted(ids)
+                statement = (
                     "UPDATE guardian_channels SET removed_at = NULL "
-                    f"WHERE removed_at IS NOT NULL AND channel_id IN ({placeholders})",
-                    tuple(sorted(ids)),
+                    "WHERE removed_at IS NOT NULL AND channel_id IN "
+                    f"({placeholders(1, len(ordered))})"
                 )
-                connection.execute(
-                    "UPDATE guardian_channels SET removed_at = ?, updated_at = ? "
-                    f"WHERE removed_at IS NULL AND channel_id NOT IN ({placeholders})",
-                    (now, now, *sorted(ids)),
+                await connection.execute(statement, *ordered)
+                await connection.execute(
+                    "UPDATE guardian_channels SET removed_at = $1, updated_at = $2 "
+                    "WHERE removed_at IS NULL AND channel_id NOT IN "
+                    f"({placeholders(3, len(ordered))})",
+                    removed_at_value,
+                    self._clock(),
+                    *ordered,
                 )
             else:
-                connection.execute(
-                    "UPDATE guardian_channels SET removed_at = ?, updated_at = ? "
+                await connection.execute(
+                    "UPDATE guardian_channels SET removed_at = $1, updated_at = $2 "
                     "WHERE removed_at IS NULL",
-                    (now, now),
+                    removed_at_value,
+                    self._clock(),
                 )
 
     async def upsert_groups(
         self,
         groups: list[UpstreamGroupSummary],
-        *,
         observed_at: datetime,
     ) -> None:
-        """Refresh the upstream group list; groups absent upstream are flagged removed."""
-        await asyncio.to_thread(self._upsert_groups_sync, groups, observed_at)
-
-    def _upsert_groups_sync(
-        self,
-        groups: list[UpstreamGroupSummary],
-        observed_at: datetime,
-    ) -> None:
-        seen = _iso(observed_at)
+        seen = observed_at
         live_ids = [group.group_id for group in groups]
-        with self._connect() as connection:
+        async with self._database.acquire() as connection:
             for group in groups:
-                connection.execute(
+                await connection.execute(
                     "INSERT INTO guardian_groups(group_id, name, total_count, "
                     "available_count, error_count, temporary_unavailable_count, "
                     "closed_count, first_seen_at, last_seen_at, removed_at) "
-                    "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, NULL) "
+                    "VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL) "
                     "ON CONFLICT(group_id) DO UPDATE SET name = excluded.name, "
                     "total_count = excluded.total_count, "
                     "available_count = excluded.available_count, "
@@ -2184,50 +1453,47 @@ class GuardianRepository:
                     "temporary_unavailable_count = excluded.temporary_unavailable_count, "
                     "closed_count = excluded.closed_count, "
                     "last_seen_at = excluded.last_seen_at, removed_at = NULL",
-                    (
-                        group.group_id,
-                        group.name,
-                        group.total_count,
-                        group.available_count,
-                        group.error_count,
-                        group.temporary_unavailable_count,
-                        group.closed_count,
-                        seen,
-                        seen,
-                    ),
+                    group.group_id,
+                    group.name,
+                    group.total_count,
+                    group.available_count,
+                    group.error_count,
+                    group.temporary_unavailable_count,
+                    group.closed_count,
+                    seen,
+                    seen,
                 )
             if live_ids:
-                placeholders = ",".join("?" for _ in live_ids)
-                connection.execute(
-                    "UPDATE guardian_groups SET removed_at = ? "
-                    f"WHERE removed_at IS NULL AND group_id NOT IN ({placeholders})",
-                    (seen, *live_ids),
+                ordered = sorted(str(item) for item in live_ids)
+                await connection.execute(
+                    "UPDATE guardian_groups SET removed_at = $1 "
+                    "WHERE removed_at IS NULL AND group_id NOT IN "
+                    f"({placeholders(2, len(ordered))})",
+                    seen,
+                    *ordered,
                 )
             else:
-                connection.execute(
-                    "UPDATE guardian_groups SET removed_at = ? WHERE removed_at IS NULL",
-                    (seen,),
+                await connection.execute(
+                    "UPDATE guardian_groups SET removed_at = $1 WHERE removed_at IS NULL",
+                    seen,
                 )
 
     async def list_groups(self) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(self._list_groups_sync)
-
-    def _list_groups_sync(self) -> list[dict[str, Any]]:
         overrides = self._list_group_overrides_sync()
-        with self._connect() as connection:
-            group_rows = connection.execute(
+        async with self._database.acquire() as connection:
+            group_rows = await connection.fetch(
                 "SELECT * FROM guardian_groups WHERE removed_at IS NULL ORDER BY group_id"
-            ).fetchall()
-            channel_rows = connection.execute(
+            )
+            channel_rows = await connection.fetch(
                 "SELECT COALESCE(group_id, 'ungrouped') AS group_id, "
                 "MAX(json_extract(details_json, '$.group_name')) AS group_name, "
                 "COUNT(*) AS channel_count, "
-                "SUM(CASE WHEN desired_schedulable = 1 THEN 1 ELSE 0 END) AS available_count, "
+                "SUM(CASE WHEN desired_schedulable THEN 1 ELSE 0 END) AS available_count, "
                 "AVG(score) AS score, AVG(latency_ms) AS latency_ms "
                 "FROM guardian_channels WHERE removed_at IS NULL "
                 "GROUP BY COALESCE(group_id, 'ungrouped') "
                 "ORDER BY group_id"
-            ).fetchall()
+            )
         channel_stats = {
             row["group_id"]: row for row in channel_rows if row["group_id"] != "ungrouped"
         }
@@ -2237,9 +1503,7 @@ class GuardianRepository:
         )
         items: list[dict[str, Any]] = []
         for group_id in merged_ids:
-            upstream = next(
-                (row for row in group_rows if row["group_id"] == group_id), None
-            )
+            upstream = next((row for row in group_rows if row["group_id"] == group_id), None)
             stats = channel_stats.get(group_id)
             items.append(
                 {
@@ -2252,12 +1516,8 @@ class GuardianRepository:
                         else f"分组 {group_id}"
                     ),
                     "channel_count": int(stats["channel_count"]) if stats else 0,
-                    "available_count": (
-                        int(stats["available_count"] or 0) if stats else 0
-                    ),
-                    "score": (
-                        round(float(stats["score"] or 0), 6) if stats else 0.0
-                    ),
+                    "available_count": (int(stats["available_count"] or 0) if stats else 0),
+                    "score": (round(float(stats["score"] or 0), 6) if stats else 0.0),
                     "latency_ms": (
                         round(float(stats["latency_ms"]), 3)
                         if stats is not None and stats["latency_ms"] is not None
@@ -2267,9 +1527,7 @@ class GuardianRepository:
                         int(upstream["total_count"]) if upstream is not None else None
                     ),
                     "upstream_available_count": (
-                        int(upstream["available_count"])
-                        if upstream is not None
-                        else None
+                        int(upstream["available_count"]) if upstream is not None else None
                     ),
                     "upstream_error_count": (
                         int(upstream["error_count"]) if upstream is not None else None
@@ -2282,11 +1540,6 @@ class GuardianRepository:
     async def set_manual_control(
         self, channel_id: str, control: ManualControl | str
     ) -> dict[str, Any]:
-        return await asyncio.to_thread(self._set_manual_control_sync, channel_id, control)
-
-    def _set_manual_control_sync(
-        self, channel_id: str, control: ManualControl | str
-    ) -> dict[str, Any]:
         parsed = ManualControl(control)
         health_by_control = {
             ManualControl.NONE: GuardianHealth.PENDING,
@@ -2294,85 +1547,76 @@ class GuardianRepository:
             ManualControl.EXCLUDED: GuardianHealth.EXCLUDED,
             ManualControl.FUSED: GuardianHealth.FUSED,
         }
-        with self._connect() as connection:
-            updated = connection.execute(
-                "UPDATE guardian_channels SET manual_control = ?, health = ?, "
-                "desired_schedulable = CASE WHEN ? = 'NONE' "
-                "THEN upstream_schedulable ELSE 0 END, updated_at = ? "
-                "WHERE channel_id = ?",
-                (
-                    parsed.value,
-                    health_by_control[parsed].value,
-                    parsed.value,
-                    _iso(self._clock()),
-                    channel_id,
-                ),
+        async with self._database.acquire() as connection:
+            updated = await connection.execute(
+                "UPDATE guardian_channels SET manual_control = $1, health = $2, "
+                "desired_schedulable = CASE WHEN $3 = 'NONE' "
+                "THEN upstream_schedulable ELSE FALSE END, updated_at = $4 "
+                "WHERE channel_id = $5",
+                parsed.value,
+                health_by_control[parsed].value,
+                parsed.value,
+                self._clock(),
+                channel_id,
             )
             if updated.rowcount != 1:
                 raise ServiceError("CHANNEL_NOT_FOUND", "The Guardian channel does not exist")
-            row = connection.execute(
-                "SELECT * FROM guardian_channels WHERE channel_id = ?", (channel_id,)
-            ).fetchone()
+            row = await connection.fetchrow(
+                "SELECT * FROM guardian_channels WHERE channel_id = $1", channel_id
+            )
         assert row is not None
         return self._channel(row)
 
     async def merge_channel_details(
         self, channel_id: str, updates: dict[str, Any]
     ) -> dict[str, Any]:
-        return await asyncio.to_thread(self._merge_channel_details_sync, channel_id, updates)
-
-    def _merge_channel_details_sync(
-        self, channel_id: str, updates: dict[str, Any]
-    ) -> dict[str, Any]:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT details_json FROM guardian_channels WHERE channel_id = ?",
-                (channel_id,),
-            ).fetchone()
+        async with self._database.acquire() as connection:
+            row = await connection.fetchrow(
+                "SELECT details_json FROM guardian_channels WHERE channel_id = $1",
+                channel_id,
+            )
             if row is None:
                 raise ServiceError("CHANNEL_NOT_FOUND", "The Guardian channel does not exist")
             details = cast(dict[str, Any], json.loads(row["details_json"]))
             details.update(updates)
-            connection.execute(
-                "UPDATE guardian_channels SET details_json = ?, updated_at = ? "
-                "WHERE channel_id = ?",
-                (_json(details), _iso(self._clock()), channel_id),
+            await connection.execute(
+                "UPDATE guardian_channels SET details_json = $1, updated_at = $2 "
+                "WHERE channel_id = $3",
+                _json(details),
+                self._clock(),
+                channel_id,
             )
-            saved = connection.execute(
+            saved = await connection.fetchrow(
                 "SELECT c.*, o.override_json AS channel_override_json "
                 "FROM guardian_channels c LEFT JOIN guardian_channel_overrides o "
-                "ON o.channel_id = c.channel_id WHERE c.channel_id = ?",
-                (channel_id,),
-            ).fetchone()
+                "ON o.channel_id = c.channel_id WHERE c.channel_id = $1",
+                channel_id,
+            )
         assert saved is not None
         return self._channel(saved)
 
     async def append_sample(self, sample: GuardianSample) -> None:
-        await asyncio.to_thread(self._append_sample_sync, sample)
-
-    def _append_sample_sync(self, sample: GuardianSample) -> None:
-        with self._connect() as connection:
-            connection.execute(
+        async with self._database.acquire() as connection:
+            await connection.execute(
                 "INSERT INTO guardian_samples(sample_id, channel_id, source, event_type, "
                 "score, occurred_at, ttfb_ms, status_code, message) "
-                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    str(uuid.uuid4()),
-                    sample.channel_id,
-                    sample.source.value,
-                    sample.event_type.value,
-                    sample.score,
-                    _iso(sample.occurred_at),
-                    sample.ttfb_ms,
-                    sample.status_code,
-                    sample.message,
-                ),
+                "VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                str(uuid.uuid4()),
+                sample.channel_id,
+                sample.source.value,
+                sample.event_type.value,
+                sample.score,
+                sample.occurred_at,
+                sample.ttfb_ms,
+                sample.status_code,
+                sample.message,
             )
-            connection.execute(
-                "DELETE FROM guardian_samples WHERE channel_id = ? AND sample_id NOT IN "
-                "(SELECT sample_id FROM guardian_samples WHERE channel_id = ? "
+            await connection.execute(
+                "DELETE FROM guardian_samples WHERE channel_id = $1 AND sample_id NOT IN "
+                "(SELECT sample_id FROM guardian_samples WHERE channel_id = $2 "
                 "ORDER BY occurred_at DESC, sample_id DESC LIMIT 10000)",
-                (sample.channel_id, sample.channel_id),
+                sample.channel_id,
+                sample.channel_id,
             )
 
     async def append_evidence(
@@ -2381,62 +1625,43 @@ class GuardianRepository:
         *,
         bucket_at: datetime,
     ) -> bool:
-        return await asyncio.to_thread(
-            self._append_evidence_sync,
-            evidence,
-            bucket_at,
-        )
-
-    def _append_evidence_sync(
-        self,
-        evidence: GuardianEvidence,
-        bucket_at: datetime,
-    ) -> bool:
         if bucket_at.tzinfo is None:
             raise ValueError("bucket_at must be timezone-aware")
-        with self._connect() as connection:
-            result = connection.execute(
-                "INSERT OR IGNORE INTO guardian_samples"
+        async with self._database.acquire() as connection:
+            status = await connection.execute(
+                "INSERT INTO guardian_samples"
                 "(sample_id, channel_id, source, event_type, score, occurred_at, ttfb_ms, "
                 "status_code, message, source_event_id, bucket_at, reliability, ingested_at, "
-                "legacy) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
-                (
-                    str(uuid.uuid4()),
-                    evidence.channel_id,
-                    evidence.source.value,
-                    evidence.event_type.value,
-                    evidence.score,
-                    _iso(evidence.occurred_at),
-                    evidence.ttfb_ms,
-                    evidence.status_code,
-                    evidence.message,
-                    evidence.source_event_id,
-                    _iso(bucket_at),
-                    evidence.reliability,
-                    _iso(self._clock()),
-                ),
+                "legacy) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, FALSE) "
+                "ON CONFLICT(sample_id) DO NOTHING",
+                str(uuid.uuid4()),
+                evidence.channel_id,
+                evidence.source.value,
+                evidence.event_type.value,
+                evidence.score,
+                evidence.occurred_at,
+                evidence.ttfb_ms,
+                evidence.status_code,
+                evidence.message,
+                evidence.source_event_id,
+                bucket_at,
+                evidence.reliability,
+                self._clock(),
             )
-        return result.rowcount == 1
+        return _rowcount(status) == 1
 
     async def list_evidence(
         self,
         channel_id: str,
-        *,
         since: datetime,
     ) -> list[GuardianEvidence]:
-        return await asyncio.to_thread(self._list_evidence_sync, channel_id, since)
-
-    def _list_evidence_sync(
-        self,
-        channel_id: str,
-        since: datetime,
-    ) -> list[GuardianEvidence]:
-        with self._connect() as connection:
-            rows = connection.execute(
-                "SELECT * FROM guardian_samples WHERE channel_id = ? AND legacy = 0 "
-                "AND occurred_at >= ? ORDER BY occurred_at DESC, sample_id DESC",
-                (channel_id, _iso(since)),
-            ).fetchall()
+        async with self._database.acquire() as connection:
+            rows = await connection.fetch(
+                "SELECT * FROM guardian_samples WHERE channel_id = $1 AND NOT legacy "
+                "AND occurred_at >= $2 ORDER BY occurred_at DESC, sample_id DESC",
+                channel_id,
+                since,
+            )
         evidence: list[GuardianEvidence] = []
         for row in rows:
             occurred_at = _dt(row["occurred_at"])
@@ -2465,26 +1690,15 @@ class GuardianRepository:
     async def list_traffic_buckets(
         self,
         channel_id: str,
-        *,
         since: datetime,
     ) -> list[GuardianEvidenceBucket]:
-        return await asyncio.to_thread(
-            self._list_traffic_buckets_sync,
-            channel_id,
-            since,
-        )
-
-    def _list_traffic_buckets_sync(
-        self,
-        channel_id: str,
-        since: datetime,
-    ) -> list[GuardianEvidenceBucket]:
-        with self._connect() as connection:
-            rows = connection.execute(
-                "SELECT * FROM guardian_traffic_buckets WHERE channel_id = ? "
-                "AND bucket_at >= ? ORDER BY bucket_at DESC",
-                (channel_id, _iso(since)),
-            ).fetchall()
+        async with self._database.acquire() as connection:
+            rows = await connection.fetch(
+                "SELECT * FROM guardian_traffic_buckets WHERE channel_id = $1 "
+                "AND bucket_at >= $2 ORDER BY bucket_at DESC",
+                channel_id,
+                since,
+            )
         buckets: list[GuardianEvidenceBucket] = []
         for row in rows:
             bucket_at = _dt(row["bucket_at"])
@@ -2507,49 +1721,39 @@ class GuardianRepository:
         self,
         buckets: list[GuardianEvidenceBucket],
     ) -> None:
-        await asyncio.to_thread(self._upsert_traffic_buckets_sync, buckets)
-
-    def _upsert_traffic_buckets_sync(
-        self,
-        buckets: list[GuardianEvidenceBucket],
-    ) -> None:
-        now = _iso(self._clock())
-        with self._connect() as connection:
+        now = self._clock()
+        async with self._database.acquire() as connection:
             for bucket in buckets:
                 if bucket.sources != frozenset({GuardianSampleSource.TRAFFIC}):
                     raise ValueError("only TRAFFIC buckets can be persisted as traffic")
-                connection.execute(
+                await connection.execute(
                     "INSERT INTO guardian_traffic_buckets"
                     "(channel_id, bucket_at, event_count, score_sum, ttfb_p95_ms, "
-                    "details_json, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?) "
+                    "details_json, created_at, updated_at) VALUES($1, $2, $3, $4, $5, $6, $7, $8) "
                     "ON CONFLICT(channel_id, bucket_at) DO UPDATE SET "
                     "event_count = excluded.event_count, score_sum = excluded.score_sum, "
                     "ttfb_p95_ms = excluded.ttfb_p95_ms, "
                     "details_json = excluded.details_json, updated_at = excluded.updated_at",
-                    (
-                        bucket.channel_id,
-                        _iso(bucket.bucket_at),
-                        bucket.event_count,
-                        bucket.score * bucket.event_count,
-                        bucket.ttfb_p95_ms,
-                        _json({"quality": bucket.quality}),
-                        now,
-                        now,
-                    ),
+                    bucket.channel_id,
+                    bucket.bucket_at,
+                    bucket.event_count,
+                    bucket.score * bucket.event_count,
+                    bucket.ttfb_p95_ms,
+                    _json({"quality": bucket.quality}),
+                    now,
+                    now,
                 )
 
-    async def list_samples(self, channel_id: str, *, limit: int = 60) -> list[GuardianSample]:
-        return await asyncio.to_thread(self._list_samples_sync, channel_id, limit)
-
-    def _list_samples_sync(self, channel_id: str, limit: int) -> list[GuardianSample]:
+    async def list_samples(self, channel_id: str, limit: int) -> list[GuardianSample]:
         if not 1 <= limit <= 10_000:
             raise ServiceError("INVALID_PAGE_SIZE", "Sample size must be between 1 and 10000")
-        with self._connect() as connection:
-            rows = connection.execute(
-                "SELECT * FROM guardian_samples WHERE channel_id = ? "
-                "ORDER BY occurred_at DESC, sample_id DESC LIMIT ?",
-                (channel_id, limit),
-            ).fetchall()
+        async with self._database.acquire() as connection:
+            rows = await connection.fetch(
+                "SELECT * FROM guardian_samples WHERE channel_id = $1 "
+                "ORDER BY occurred_at DESC, sample_id DESC LIMIT $2",
+                channel_id,
+                limit,
+            )
         samples: list[GuardianSample] = []
         for row in rows:
             occurred_at = _dt(row["occurred_at"])
@@ -2571,62 +1775,36 @@ class GuardianRepository:
     async def create_run(
         self, *, dry_run: bool, idempotency_key: str | None = None
     ) -> dict[str, Any]:
-        return await asyncio.to_thread(self._create_run_sync, dry_run, idempotency_key)
-
-    def _create_run_sync(self, dry_run: bool, idempotency_key: str | None) -> dict[str, Any]:
         key = idempotency_key.strip()[:128] if idempotency_key else None
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
+        now = self._clock()
+        run_id = str(uuid.uuid4())
+        async with self._database.transaction() as connection:
             if key:
-                existing = connection.execute(
-                    "SELECT * FROM guardian_runs WHERE idempotency_key = ?", (key,)
-                ).fetchone()
+                existing = await connection.fetchrow(
+                    "SELECT * FROM guardian_runs WHERE idempotency_key = $1",
+                    key,
+                )
                 if existing is not None:
-                    connection.execute("COMMIT")
                     result = self._run(existing)
                     result["created"] = False
                     return result
-            now = _iso(self._clock())
-            run_id = str(uuid.uuid4())
-            connection.execute(
+            await connection.execute(
                 "INSERT INTO guardian_runs(run_id, idempotency_key, dry_run, status, "
-                "started_at, updated_at) VALUES(?, ?, ?, 'RUNNING', ?, ?)",
-                (run_id, key, int(dry_run), now, now),
+                "started_at, updated_at) VALUES($1, $2, $3, 'RUNNING', $4, $5)",
+                run_id,
+                key,
+                dry_run,
+                now,
+                now,
             )
-            row = connection.execute(
-                "SELECT * FROM guardian_runs WHERE run_id = ?", (run_id,)
-            ).fetchone()
-            connection.execute("COMMIT")
-        except Exception:
-            connection.execute("ROLLBACK")
-            raise
-        finally:
-            connection.close()
-        assert row is not None
+            row = await connection.fetchrow("SELECT * FROM guardian_runs WHERE run_id = $1", run_id)
+        if row is None:
+            raise RuntimeError("Guardian run disappeared after insert")
         result = self._run(row)
         result["created"] = True
         return result
 
     async def finish_run(
-        self,
-        run_id: str,
-        *,
-        status: str,
-        result: dict[str, Any] | None = None,
-        error_code: str | None = None,
-        error_message: str | None = None,
-    ) -> dict[str, Any]:
-        return await asyncio.to_thread(
-            self._finish_run_sync,
-            run_id,
-            status,
-            result,
-            error_code,
-            error_message,
-        )
-
-    def _finish_run_sync(
         self,
         run_id: str,
         status: str,
@@ -2636,90 +1814,54 @@ class GuardianRepository:
     ) -> dict[str, Any]:
         if status not in {"SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"}:
             raise ValueError("invalid Guardian run terminal status")
-        now = _iso(self._clock())
-        with self._connect() as connection:
-            updated = connection.execute(
-                "UPDATE guardian_runs SET status = ?, result_json = ?, error_code = ?, "
-                "error_message = ?, finished_at = ?, updated_at = ? "
-                "WHERE run_id = ? AND status = 'RUNNING'",
-                (
-                    status,
-                    _json(result) if result is not None else None,
-                    error_code,
-                    error_message,
-                    now,
-                    now,
-                    run_id,
-                ),
+        now = self._clock()
+        async with self._database.acquire() as connection:
+            updated = await connection.execute(
+                "UPDATE guardian_runs SET status = $1, result_json = $2, error_code = $3, "
+                "error_message = $4, finished_at = $5, updated_at = $6 "
+                "WHERE run_id = $7 AND status = 'RUNNING'",
+                status,
+                _json(result) if result is not None else None,
+                error_code,
+                error_message,
+                now,
+                now,
+                run_id,
             )
             if updated.rowcount != 1:
                 raise ServiceError("INVALID_RUN_STATE", "The Guardian run is not running")
-            row = connection.execute(
-                "SELECT * FROM guardian_runs WHERE run_id = ?", (run_id,)
-            ).fetchone()
+            row = await connection.fetchrow("SELECT * FROM guardian_runs WHERE run_id = $1", run_id)
         assert row is not None
         return self._run(row)
 
     async def get_run(self, run_id: str) -> dict[str, Any] | None:
-        return await asyncio.to_thread(self._get_run_sync, run_id)
-
-    def _get_run_sync(self, run_id: str) -> dict[str, Any] | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM guardian_runs WHERE run_id = ?", (run_id,)
-            ).fetchone()
+        async with self._database.acquire() as connection:
+            row = await connection.fetchrow("SELECT * FROM guardian_runs WHERE run_id = $1", run_id)
         return self._run(row) if row is not None else None
 
-    async def list_runs(self, *, limit: int = 20) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(self._list_runs_sync, limit)
-
-    def _list_runs_sync(self, limit: int) -> list[dict[str, Any]]:
-        with self._connect() as connection:
-            rows = connection.execute(
-                "SELECT * FROM guardian_runs ORDER BY started_at DESC, run_id DESC LIMIT ?",
-                (max(1, min(limit, 100)),),
-            ).fetchall()
+    async def list_runs(self, limit: int) -> list[dict[str, Any]]:
+        async with self._database.acquire() as connection:
+            rows = await connection.fetch(
+                "SELECT * FROM guardian_runs ORDER BY started_at DESC, run_id DESC LIMIT $1",
+                max(1, min(limit, 100)),
+            )
         return [self._run(row) for row in rows]
 
     async def cancel_run(self, run_id: str) -> dict[str, Any]:
-        return await asyncio.to_thread(self._cancel_run_sync, run_id)
-
-    def _cancel_run_sync(self, run_id: str) -> dict[str, Any]:
-        with self._connect() as connection:
-            updated = connection.execute(
-                "UPDATE guardian_runs SET cancel_requested = 1, updated_at = ? "
-                "WHERE run_id = ? AND status = 'RUNNING'",
-                (_iso(self._clock()), run_id),
+        async with self._database.acquire() as connection:
+            updated = await connection.execute(
+                "UPDATE guardian_runs SET cancel_requested = TRUE, updated_at = $1 "
+                "WHERE run_id = $2 AND status = 'RUNNING'",
+                self._clock(),
+                run_id,
             )
             if updated.rowcount != 1:
                 raise ServiceError("INVALID_RUN_STATE", "The Guardian run is not running")
-            row = connection.execute(
-                "SELECT * FROM guardian_runs WHERE run_id = ?", (run_id,)
-            ).fetchone()
+            row = await connection.fetchrow("SELECT * FROM guardian_runs WHERE run_id = $1", run_id)
         assert row is not None
         return self._run(row)
 
     async def add_event(
-        self,
-        *,
-        event_type: str,
-        severity: str,
-        message: str,
-        channel_id: str | None = None,
-        group_id: str | None = None,
-        details: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        return await asyncio.to_thread(
-            self._add_event_sync,
-            event_type,
-            severity,
-            message,
-            channel_id,
-            group_id,
-            details or {},
-        )
-
-    def _add_event_sync(
         self,
         event_type: str,
         severity: str,
@@ -2729,23 +1871,22 @@ class GuardianRepository:
         details: dict[str, Any],
     ) -> dict[str, Any]:
         event_id = str(uuid.uuid4())
-        now = _iso(self._clock())
-        with self._connect() as connection:
-            connection.execute(
+        now = self._clock()
+        async with self._database.acquire() as connection:
+            await connection.execute(
                 "INSERT INTO guardian_events(event_id, event_type, severity, channel_id, "
-                "group_id, message, details_json, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    event_id,
-                    event_type[:64],
-                    severity[:16],
-                    channel_id,
-                    group_id,
-                    message[:1000],
-                    _json(details),
-                    now,
-                ),
+                "group_id, message, details_json, created_at) "
+                "VALUES($1, $2, $3, $4, $5, $6, $7, $8)",
+                event_id,
+                event_type[:64],
+                severity[:16],
+                channel_id,
+                group_id,
+                message[:1000],
+                _json(details),
+                now,
             )
-            connection.execute(
+            await connection.execute(
                 "DELETE FROM guardian_events WHERE event_id NOT IN "
                 "(SELECT event_id FROM guardian_events "
                 "ORDER BY created_at DESC, event_id DESC LIMIT 100000)"
@@ -2763,16 +1904,6 @@ class GuardianRepository:
 
     async def list_events(
         self,
-        *,
-        limit: int = 50,
-        cursor: str | None = None,
-        event_type: str | None = None,
-        severity: str | None = None,
-    ) -> dict[str, Any]:
-        return await asyncio.to_thread(self._list_events_sync, limit, cursor, event_type, severity)
-
-    def _list_events_sync(
-        self,
         limit: int,
         cursor: str | None,
         event_type: str | None,
@@ -2783,23 +1914,26 @@ class GuardianRepository:
         conditions: list[str] = []
         params: list[object] = []
         if event_type:
-            conditions.append("event_type = ?")
             params.append(event_type[:64])
+            conditions.append(f"event_type = ${len(params)}")
         if severity:
-            conditions.append("severity = ?")
             params.append(severity[:16])
+            conditions.append(f"severity = ${len(params)}")
         if cursor:
             created_at, event_id = _decode_cursor(cursor)
-            conditions.append("(created_at < ? OR (created_at = ? AND event_id < ?))")
             params.extend((created_at, created_at, event_id))
+            conditions.append(
+                f"(created_at < ${len(params) - 2} "
+                f"OR (created_at = ${len(params) - 2} AND event_id < ${len(params)}))"
+            )
         where = "WHERE " + " AND ".join(conditions) if conditions else ""
         params.append(limit + 1)
-        with self._connect() as connection:
-            rows = connection.execute(
+        async with self._database.acquire() as connection:
+            rows = await connection.fetch(
                 f"SELECT * FROM guardian_events {where} "
-                "ORDER BY created_at DESC, event_id DESC LIMIT ?",
-                params,
-            ).fetchall()
+                f"ORDER BY created_at DESC, event_id DESC LIMIT ${len(params)}",
+                *params,
+            )
         selected = rows[:limit]
         return {
             "items": [self._event(row) for row in selected],
@@ -2811,49 +1945,43 @@ class GuardianRepository:
         }
 
     async def acquire_lease(self, lease_key: str, owner: str, *, seconds: int) -> bool:
-        return await asyncio.to_thread(self._acquire_lease_sync, lease_key, owner, seconds)
-
-    def _acquire_lease_sync(self, lease_key: str, owner: str, seconds: int) -> bool:
         now = self._clock().astimezone(UTC)
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                "SELECT owner, expires_at FROM guardian_leases WHERE lease_key = ?",
-                (lease_key,),
-            ).fetchone()
-            now_text = _iso(now)
-            if row is not None and row["owner"] != owner and row["expires_at"] > now_text:
-                connection.execute("COMMIT")
+        expires_at = now + timedelta(seconds=seconds)
+        # ``FOR UPDATE`` on the existing lease row serializes two contenders,
+        # which SQLite's write lock provided implicitly; when no row exists the
+        # INSERT .. ON CONFLICT handles the race instead.
+        async with self._database.transaction() as connection:
+            row = await connection.fetchrow(
+                "SELECT owner, expires_at FROM guardian_leases WHERE lease_key = $1 FOR UPDATE",
+                lease_key,
+            )
+            if row is not None and row["owner"] != owner and row["expires_at"] > now:
                 return False
-            connection.execute(
-                "INSERT INTO guardian_leases(lease_key, owner, expires_at) VALUES(?, ?, ?) "
+            await connection.execute(
+                "INSERT INTO guardian_leases(lease_key, owner, expires_at) "
+                "VALUES($1, $2, $3) "
                 "ON CONFLICT(lease_key) DO UPDATE SET owner = excluded.owner, "
                 "expires_at = excluded.expires_at",
-                (lease_key, owner, _iso(now + timedelta(seconds=seconds))),
+                lease_key,
+                owner,
+                expires_at,
             )
-            connection.execute("COMMIT")
-            return True
-        except Exception:
-            connection.execute("ROLLBACK")
-            raise
-        finally:
-            connection.close()
+        return True
 
     async def release_lease(self, lease_key: str, owner: str) -> None:
-        await asyncio.to_thread(self._release_lease_sync, lease_key, owner)
-
-    def _release_lease_sync(self, lease_key: str, owner: str) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                "DELETE FROM guardian_leases WHERE lease_key = ? AND owner = ?",
-                (lease_key, owner),
+        async with self._database.acquire() as connection:
+            await connection.execute(
+                "DELETE FROM guardian_leases WHERE lease_key = $1 AND owner = $2",
+                lease_key,
+                owner,
             )
 
     async def overview(self) -> dict[str, Any]:
-        counts = await asyncio.to_thread(self._overview_counts_sync)
-        runs = await self.list_runs(limit=1)
-        policy = await self.get_policy()
+        counts, runs, policy = await asyncio.gather(
+            self._overview_counts_sync(),
+            self.list_runs(limit=1),
+            self.get_policy(),
+        )
         return {
             "enabled": policy.enabled,
             "policy_revision": policy.revision,
@@ -2863,16 +1991,16 @@ class GuardianRepository:
             "last_run": runs[0] if runs else None,
         }
 
-    def _overview_counts_sync(self) -> dict[str, Any]:
-        with self._connect() as connection:
-            totals = connection.execute(
+    async def _overview_counts_sync(self) -> dict[str, Any]:
+        async with self._database.acquire() as connection:
+            totals = await connection.fetchrow(
                 "SELECT COUNT(*) AS channel_count, "
                 "COUNT(DISTINCT COALESCE(group_id, 'ungrouped')) AS group_count "
                 "FROM guardian_channels"
-            ).fetchone()
-            rows = connection.execute(
+            )
+            rows = await connection.fetch(
                 "SELECT health, COUNT(*) AS count FROM guardian_channels GROUP BY health"
-            ).fetchall()
+            )
         return {
             "channel_count": int(totals["channel_count"] if totals else 0),
             "group_count": int(totals["group_count"] if totals else 0),
@@ -2880,15 +2008,12 @@ class GuardianRepository:
         }
 
     async def probe_spend(self) -> dict[str, Any]:
-        return await asyncio.to_thread(self._probe_spend_sync)
-
-    def _probe_spend_sync(self) -> dict[str, Any]:
-        with self._connect() as connection:
-            row = connection.execute(
+        async with self._database.acquire() as connection:
+            row = await connection.fetchrow(
                 "SELECT COUNT(*) AS probes, SUM(estimated_cost) AS cost, "
-                "SUM(CASE WHEN priced = 0 THEN 1 ELSE 0 END) AS unpriced "
+                "SUM(CASE WHEN NOT priced THEN 1 ELSE 0 END) AS unpriced "
                 "FROM guardian_probe_ledger"
-            ).fetchone()
+            )
         return {
             "probe_count": int(row["probes"] or 0),
             "estimated_cost": float(row["cost"] or 0),
@@ -2897,22 +2022,19 @@ class GuardianRepository:
         }
 
     async def sampling_status(self) -> dict[str, Any]:
-        return await asyncio.to_thread(self._sampling_status_sync)
-
-    def _sampling_status_sync(self) -> dict[str, Any]:
-        with self._connect() as connection:
-            snapshots = connection.execute(
+        async with self._database.acquire() as connection:
+            snapshots = await connection.fetchrow(
                 "SELECT COUNT(*) AS total, "
                 "COUNT(CASE WHEN consumed_at IS NULL THEN 1 END) AS pending, "
                 "MAX(captured_at) AS latest FROM guardian_input_snapshots"
-            ).fetchone()
-            traffic = connection.execute(
+            )
+            traffic = await connection.fetchrow(
                 "SELECT COUNT(*) AS count, MAX(bucket_at) AS latest FROM guardian_traffic_buckets"
-            ).fetchone()
-            freshness = connection.execute(
+            )
+            freshness = await connection.fetch(
                 "SELECT freshness_state, COUNT(*) AS count FROM guardian_channels "
                 "GROUP BY freshness_state"
-            ).fetchall()
+            )
         return {
             "shared_snapshots": int(snapshots["total"] or 0),
             "pending_snapshots": int(snapshots["pending"] or 0),
@@ -2926,48 +2048,6 @@ class GuardianRepository:
 
     async def record_recovery_probe(
         self,
-        *,
-        channel_id: str,
-        model: str,
-        input_tokens: int,
-        output_tokens: int,
-        estimated_cost: float | None,
-        priced: bool,
-        occurred_at: datetime,
-    ) -> None:
-        await asyncio.to_thread(
-            self._record_recovery_probe_sync,
-            channel_id,
-            model,
-            input_tokens,
-            output_tokens,
-            estimated_cost,
-            priced,
-            occurred_at,
-            None,
-        )
-
-    async def record_recovery_probe_blocked(
-        self,
-        *,
-        channel_id: str,
-        reason: str,
-        occurred_at: datetime,
-    ) -> None:
-        await asyncio.to_thread(
-            self._record_recovery_probe_sync,
-            channel_id,
-            "",
-            None,
-            None,
-            None,
-            False,
-            occurred_at,
-            reason,
-        )
-
-    def _record_recovery_probe_sync(
-        self,
         channel_id: str,
         model: str,
         input_tokens: int | None,
@@ -2979,44 +2059,54 @@ class GuardianRepository:
     ) -> None:
         if occurred_at.tzinfo is None:
             raise ValueError("probe ledger time must be timezone-aware")
-        with self._connect() as connection:
-            connection.execute(
+        async with self._database.acquire() as connection:
+            await connection.execute(
                 "INSERT INTO guardian_probe_ledger"
                 "(ledger_id, channel_id, model, input_tokens, output_tokens, estimated_cost, "
                 "priced, budget_date, request_source, blocked_reason, occurred_at) "
-                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'RECOVERY_PROBE', ?, ?)",
-                (
-                    str(uuid.uuid4()),
-                    channel_id,
-                    model[:200],
-                    input_tokens,
-                    output_tokens,
-                    estimated_cost,
-                    int(priced),
-                    occurred_at.astimezone(ZoneInfo("Asia/Shanghai")).date().isoformat(),
-                    blocked_reason[:200] if blocked_reason else None,
-                    _iso(occurred_at),
-                ),
+                "VALUES($1, $2, $3, $4, $5, $6, $7, $8, 'RECOVERY_PROBE', $9, $10)",
+                str(uuid.uuid4()),
+                channel_id,
+                model[:200],
+                input_tokens,
+                output_tokens,
+                estimated_cost,
+                priced,
+                occurred_at.astimezone(ZoneInfo("Asia/Shanghai")).date().isoformat(),
+                blocked_reason[:200] if blocked_reason else None,
+                occurred_at,
             )
 
-    async def recovery_probe_budget_summary(self, budget_date: date) -> dict[str, Any]:
-        return await asyncio.to_thread(
-            self._recovery_probe_budget_summary_sync,
-            budget_date.isoformat(),
+    async def record_recovery_probe_blocked(
+        self,
+        *,
+        channel_id: str,
+        reason: str,
+        occurred_at: datetime,
+    ) -> None:
+        await self.record_recovery_probe(
+            channel_id,
+            "",
+            None,
+            None,
+            None,
+            False,
+            occurred_at,
+            reason,
         )
 
-    def _recovery_probe_budget_summary_sync(self, budget_date: str) -> dict[str, Any]:
-        with self._connect() as connection:
-            row = connection.execute(
+    async def recovery_probe_budget_summary(self, budget_date: str) -> dict[str, Any]:
+        async with self._database.acquire() as connection:
+            row = await connection.fetchrow(
                 "SELECT COUNT(CASE WHEN blocked_reason IS NULL THEN 1 END) AS requests, "
                 "SUM(CASE WHEN blocked_reason IS NULL "
                 "THEN COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) ELSE 0 END) "
                 "AS tokens, SUM(CASE WHEN blocked_reason IS NULL THEN estimated_cost ELSE 0 END) "
                 "AS cost, COUNT(CASE WHEN blocked_reason IS NOT NULL THEN 1 END) AS blocked "
                 "FROM guardian_probe_ledger "
-                "WHERE request_source = 'RECOVERY_PROBE' AND budget_date = ?",
-                (budget_date,),
-            ).fetchone()
+                "WHERE request_source = 'RECOVERY_PROBE' AND budget_date = $1",
+                budget_date,
+            )
         return {
             "request_count": int(row["requests"] or 0),
             "total_tokens": int(row["tokens"] or 0),
@@ -3036,27 +2126,23 @@ class GuardianRepository:
             raise ValueError("retention time must be timezone-aware")
         if not 1 <= batch_size <= 100_000:
             raise ValueError("batch_size must be between 1 and 100000")
-        return await asyncio.to_thread(
-            self._cleanup_retention_sync,
-            reference,
-            batch_size,
-        )
+        return await self._cleanup_retention_async(reference, batch_size)
 
-    def _cleanup_retention_sync(
+    async def _cleanup_retention_async(
         self,
         now: datetime,
         batch_size: int,
     ) -> dict[str, int]:
         cutoffs = {
-            "dedup": _iso(now - timedelta(days=7)),
-            "account_observations": _iso(now - timedelta(days=2)),
-            "runs": _iso(now - timedelta(days=7)),
-            "traffic": _iso(now - timedelta(days=30)),
-            "events": _iso(now - timedelta(days=90)),
-            "probes": _iso(now - timedelta(days=90)),
-            "recovery": _iso(now - timedelta(days=90)),
-            "samples": _iso(now - timedelta(days=90)),
-            "snapshots": _iso(now - timedelta(days=90)),
+            "dedup": now - timedelta(days=7),
+            "account_observations": now - timedelta(days=2),
+            "runs": now - timedelta(days=7),
+            "traffic": now - timedelta(days=30),
+            "events": now - timedelta(days=90),
+            "probes": now - timedelta(days=90),
+            "recovery": now - timedelta(days=90),
+            "samples": now - timedelta(days=90),
+            "snapshots": now - timedelta(days=90),
         }
         counts = {
             "account_observations": 0,
@@ -3073,134 +2159,125 @@ class GuardianRepository:
             "source_ids_redacted": 0,
         }
         remaining = batch_size
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            jobs_available = connection.execute(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'jobs'"
-            ).fetchone()
+        # Postgres exposes the physical row id as ``ctid``; it plays the role
+        # ``rowid`` had in the batched deletes below.  One transaction keeps the
+        # whole cleanup atomic, matching the former BEGIN IMMEDIATE block.
+        async with self._database.transaction() as connection:
             queued_recovery_guard = (
                 "AND NOT EXISTS (SELECT 1 FROM jobs j "
                 "WHERE j.job_type = 'RECOVERY' AND j.status IN ('QUEUED', 'RUNNING') "
-                "AND json_extract(j.payload_json, '$.snapshot_id') = o.snapshot_id) "
-                if jobs_available is not None
-                else ""
+                "AND j.payload_json::jsonb ->> 'snapshot_id' = o.snapshot_id) "
             )
 
-            def execute_bounded(key: str, sql: str, params: tuple[object, ...]) -> None:
+            async def execute_bounded(
+                key: str,
+                sql: str,
+                cutoff: datetime,
+            ) -> None:
                 nonlocal remaining
                 if remaining <= 0:
                     return
-                cursor = connection.execute(sql, (*params, remaining))
-                changed = max(0, cursor.rowcount)
+                status = await connection.execute(sql, cutoff, remaining)
+                changed = max(0, _rowcount(status))
                 counts[key] += changed
                 remaining -= changed
 
-            execute_bounded(
+            await execute_bounded(
                 "account_observations",
-                "DELETE FROM guardian_account_observations WHERE rowid IN "
-                "(SELECT rowid FROM guardian_account_observations o "
-                "WHERE o.observed_at < ? "
+                "DELETE FROM guardian_account_observations WHERE ctid IN "
+                "(SELECT o.ctid FROM guardian_account_observations o "
+                "WHERE o.observed_at < $1 "
                 "AND NOT EXISTS (SELECT 1 FROM guardian_channel_error_episodes e "
                 "WHERE e.status = 'OPEN' AND e.opened_snapshot_id = o.snapshot_id) "
                 "AND NOT EXISTS (SELECT 1 FROM guardian_account_recovery_runs r "
                 "WHERE r.status = 'RUNNING' AND r.snapshot_id = o.snapshot_id) "
                 f"{queued_recovery_guard}"
-                "ORDER BY o.observed_at LIMIT ?)",
-                (cutoffs["account_observations"],),
+                "ORDER BY o.observed_at LIMIT $2)",
+                cutoffs["account_observations"],
             )
-            execute_bounded(
+            await execute_bounded(
                 "runs",
-                "DELETE FROM guardian_runs WHERE rowid IN "
-                "(SELECT rowid FROM guardian_runs WHERE status <> 'RUNNING' "
-                "AND COALESCE(finished_at, updated_at) < ? "
-                "ORDER BY updated_at LIMIT ?)",
-                (cutoffs["runs"],),
+                "DELETE FROM guardian_runs WHERE ctid IN "
+                "(SELECT ctid FROM guardian_runs WHERE status <> 'RUNNING' "
+                "AND COALESCE(finished_at, updated_at) < $1 "
+                "ORDER BY updated_at LIMIT $2)",
+                cutoffs["runs"],
             )
-            execute_bounded(
+            await execute_bounded(
                 "events",
-                "DELETE FROM guardian_events WHERE rowid IN "
-                "(SELECT rowid FROM guardian_events WHERE created_at < ? "
-                "ORDER BY created_at LIMIT ?)",
-                (cutoffs["events"],),
+                "DELETE FROM guardian_events WHERE ctid IN "
+                "(SELECT ctid FROM guardian_events WHERE created_at < $1 "
+                "ORDER BY created_at LIMIT $2)",
+                cutoffs["events"],
             )
-            execute_bounded(
+            await execute_bounded(
                 "probe_ledger",
-                "DELETE FROM guardian_probe_ledger WHERE rowid IN "
-                "(SELECT rowid FROM guardian_probe_ledger WHERE occurred_at < ? "
-                "ORDER BY occurred_at LIMIT ?)",
-                (cutoffs["probes"],),
+                "DELETE FROM guardian_probe_ledger WHERE ctid IN "
+                "(SELECT ctid FROM guardian_probe_ledger WHERE occurred_at < $1 "
+                "ORDER BY occurred_at LIMIT $2)",
+                cutoffs["probes"],
             )
-            execute_bounded(
+            await execute_bounded(
                 "closed_episodes",
-                "DELETE FROM guardian_channel_error_episodes WHERE rowid IN "
-                "(SELECT rowid FROM guardian_channel_error_episodes "
-                "WHERE status = 'CLOSED' AND COALESCE(closed_at, updated_at) < ? "
-                "ORDER BY updated_at LIMIT ?)",
-                (cutoffs["recovery"],),
+                "DELETE FROM guardian_channel_error_episodes WHERE ctid IN "
+                "(SELECT ctid FROM guardian_channel_error_episodes "
+                "WHERE status = 'CLOSED' AND COALESCE(closed_at, updated_at) < $1 "
+                "ORDER BY updated_at LIMIT $2)",
+                cutoffs["recovery"],
             )
-            execute_bounded(
+            await execute_bounded(
                 "recovery_runs",
-                "DELETE FROM guardian_account_recovery_runs WHERE rowid IN "
-                "(SELECT rowid FROM guardian_account_recovery_runs "
-                "WHERE status <> 'RUNNING' AND COALESCE(finished_at, updated_at) < ? "
-                "ORDER BY updated_at LIMIT ?)",
-                (cutoffs["recovery"],),
+                "DELETE FROM guardian_account_recovery_runs WHERE ctid IN "
+                "(SELECT ctid FROM guardian_account_recovery_runs "
+                "WHERE status <> 'RUNNING' AND COALESCE(finished_at, updated_at) < $1 "
+                "ORDER BY updated_at LIMIT $2)",
+                cutoffs["recovery"],
             )
-            execute_bounded(
+            await execute_bounded(
                 "idempotency",
-                "DELETE FROM guardian_idempotency WHERE rowid IN "
-                "(SELECT rowid FROM guardian_idempotency WHERE created_at < ? "
-                "ORDER BY created_at LIMIT ?)",
-                (cutoffs["dedup"],),
+                "DELETE FROM guardian_idempotency WHERE ctid IN "
+                "(SELECT ctid FROM guardian_idempotency WHERE created_at < $1 "
+                "ORDER BY created_at LIMIT $2)",
+                cutoffs["dedup"],
             )
-            execute_bounded(
+            await execute_bounded(
                 "samples",
-                "DELETE FROM guardian_samples WHERE rowid IN "
-                "(SELECT rowid FROM guardian_samples WHERE occurred_at < ? "
-                "ORDER BY occurred_at LIMIT ?)",
-                (cutoffs["samples"],),
+                "DELETE FROM guardian_samples WHERE ctid IN "
+                "(SELECT ctid FROM guardian_samples WHERE occurred_at < $1 "
+                "ORDER BY occurred_at LIMIT $2)",
+                cutoffs["samples"],
             )
-            execute_bounded(
+            await execute_bounded(
                 "traffic_buckets",
-                "DELETE FROM guardian_traffic_buckets WHERE rowid IN "
-                "(SELECT rowid FROM guardian_traffic_buckets WHERE bucket_at < ? "
-                "ORDER BY bucket_at LIMIT ?)",
-                (cutoffs["traffic"],),
+                "DELETE FROM guardian_traffic_buckets WHERE ctid IN "
+                "(SELECT ctid FROM guardian_traffic_buckets WHERE bucket_at < $1 "
+                "ORDER BY bucket_at LIMIT $2)",
+                cutoffs["traffic"],
             )
-            execute_bounded(
+            await execute_bounded(
                 "snapshots",
-                "DELETE FROM guardian_input_snapshots WHERE rowid IN "
-                "(SELECT rowid FROM guardian_input_snapshots "
-                "WHERE consumed_at IS NOT NULL AND captured_at < ? "
-                "ORDER BY captured_at LIMIT ?)",
-                (cutoffs["snapshots"],),
+                "DELETE FROM guardian_input_snapshots WHERE ctid IN "
+                "(SELECT ctid FROM guardian_input_snapshots "
+                "WHERE consumed_at IS NOT NULL AND captured_at < $1 "
+                "ORDER BY captured_at LIMIT $2)",
+                cutoffs["snapshots"],
             )
-            execute_bounded(
+            await execute_bounded(
                 "snapshot_payloads_redacted",
-                "UPDATE guardian_input_snapshots SET payload_json = '{}' WHERE rowid IN "
-                "(SELECT rowid FROM guardian_input_snapshots "
-                "WHERE consumed_at IS NOT NULL AND captured_at < ? AND payload_json <> '{}' "
-                "ORDER BY captured_at LIMIT ?)",
-                (cutoffs["dedup"],),
+                "UPDATE guardian_input_snapshots SET payload_json = '{}' WHERE ctid IN "
+                "(SELECT ctid FROM guardian_input_snapshots "
+                "WHERE consumed_at IS NOT NULL AND captured_at < $1 AND payload_json <> '{}' "
+                "ORDER BY captured_at LIMIT $2)",
+                cutoffs["dedup"],
             )
-            execute_bounded(
+            await execute_bounded(
                 "source_ids_redacted",
-                "UPDATE guardian_samples SET source_event_id = NULL WHERE rowid IN "
-                "(SELECT rowid FROM guardian_samples "
-                "WHERE occurred_at < ? AND source_event_id IS NOT NULL "
-                "ORDER BY occurred_at LIMIT ?)",
-                (cutoffs["dedup"],),
+                "UPDATE guardian_samples SET source_event_id = NULL WHERE ctid IN "
+                "(SELECT ctid FROM guardian_samples "
+                "WHERE occurred_at < $1 AND source_event_id IS NOT NULL "
+                "ORDER BY occurred_at LIMIT $2)",
+                cutoffs["dedup"],
             )
-            connection.execute("COMMIT")
-            connection.execute("PRAGMA wal_checkpoint(PASSIVE)")
-            connection.execute("PRAGMA optimize")
-        except Exception:
-            if connection.in_transaction:
-                connection.execute("ROLLBACK")
-            raise
-        finally:
-            connection.close()
         counts["deleted_total"] = sum(
             counts[key]
             for key in (
@@ -3222,22 +2299,14 @@ class GuardianRepository:
     async def get_idempotent_result(
         self, idempotency_key: str, action: str, subject: str | None
     ) -> dict[str, Any] | None:
-        return await asyncio.to_thread(
-            self._get_idempotent_result_sync,
-            idempotency_key,
-            action,
-            subject,
-        )
-
-    def _get_idempotent_result_sync(
-        self, idempotency_key: str, action: str, subject: str | None
-    ) -> dict[str, Any] | None:
-        with self._connect() as connection:
-            row = connection.execute(
+        async with self._database.acquire() as connection:
+            row = await connection.fetchrow(
                 "SELECT result_json FROM guardian_idempotency "
-                "WHERE idempotency_key = ? AND action = ? AND subject = ?",
-                (idempotency_key, action, subject or ""),
-            ).fetchone()
+                "WHERE idempotency_key = $1 AND action = $2 AND subject = $3",
+                idempotency_key,
+                action,
+                subject or "",
+            )
         return cast(dict[str, Any], json.loads(row["result_json"])) if row is not None else None
 
     async def save_idempotent_result(
@@ -3247,78 +2316,60 @@ class GuardianRepository:
         subject: str | None,
         result: dict[str, Any],
     ) -> None:
-        await asyncio.to_thread(
-            self._save_idempotent_result_sync,
-            idempotency_key,
-            action,
-            subject,
-            result,
-        )
-
-    def _save_idempotent_result_sync(
-        self,
-        idempotency_key: str,
-        action: str,
-        subject: str | None,
-        result: dict[str, Any],
-    ) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                "INSERT OR IGNORE INTO guardian_idempotency"
+        async with self._database.acquire() as connection:
+            await connection.execute(
+                "INSERT INTO guardian_idempotency"
                 "(idempotency_key, action, subject, result_json, created_at) "
-                "VALUES(?, ?, ?, ?, ?)",
-                (
-                    idempotency_key,
-                    action,
-                    subject or "",
-                    _json(result),
-                    _iso(self._clock()),
-                ),
+                "VALUES($1, $2, $3, $4, $5) "
+                "ON CONFLICT(idempotency_key, action, subject) DO NOTHING",
+                idempotency_key,
+                action,
+                subject or "",
+                _json(result),
+                self._clock(),
             )
-            connection.execute(
-                "DELETE FROM guardian_idempotency WHERE rowid NOT IN "
-                "(SELECT rowid FROM guardian_idempotency "
-                "ORDER BY created_at DESC LIMIT 10000)"
+            # Postgres has no ``rowid``; trim by the composite primary key's
+            # ordering column instead of SQLite's implicit row identity.
+            await connection.execute(
+                "DELETE FROM guardian_idempotency WHERE ctid IN "
+                "(SELECT ctid FROM guardian_idempotency "
+                "ORDER BY created_at DESC LIMIT 10000 OFFSET 10000)"
             )
 
     async def get_account_preferred_model(self, account_id: str) -> str | None:
-        return await asyncio.to_thread(self._get_account_preferred_model_sync, account_id)
-
-    def _get_account_preferred_model_sync(self, account_id: str) -> str | None:
-        with self._connect() as connection:
-            row = connection.execute(
+        async with self._database.acquire() as connection:
+            row = await connection.fetchrow(
                 "SELECT preferred_probe_model FROM guardian_account_preferences "
-                "WHERE account_id = ?",
-                (account_id,),
-            ).fetchone()
+                "WHERE account_id = $1",
+                account_id,
+            )
             if row is None or not row["preferred_probe_model"]:
                 return None
             return str(row["preferred_probe_model"])
 
     async def set_account_preferred_model(self, account_id: str, model: str | None) -> None:
-        await asyncio.to_thread(self._set_account_preferred_model_sync, account_id, model)
-
-    def _set_account_preferred_model_sync(self, account_id: str, model: str | None) -> None:
-        now = _iso(self._clock())
-        with self._connect() as connection:
+        now = self._clock()
+        async with self._database.acquire() as connection:
             if model:
-                connection.execute(
+                await connection.execute(
                     "INSERT INTO guardian_account_preferences("
-                    "account_id, preferred_probe_model, updated_at) VALUES(?, ?, ?) "
+                    "account_id, preferred_probe_model, updated_at) VALUES($1, $2, $3) "
                     "ON CONFLICT(account_id) DO UPDATE SET "
                     "preferred_probe_model = excluded.preferred_probe_model, "
                     "updated_at = excluded.updated_at",
-                    (account_id, model, now),
+                    account_id,
+                    model,
+                    now,
                 )
             else:
-                connection.execute(
-                    "DELETE FROM guardian_account_preferences WHERE account_id = ?",
-                    (account_id,),
+                await connection.execute(
+                    "DELETE FROM guardian_account_preferences WHERE account_id = $1",
+                    account_id,
                 )
 
     @staticmethod
     def _account_observation_from_row(
-        row: sqlite3.Row,
+        row: Any,
     ) -> GuardianAccountObservation:
         try:
             row_keys = row.keys()
@@ -3331,9 +2382,7 @@ class GuardianRepository:
                     "expired": bool(row["expired"]),
                     "temporary_unavailable": bool(row["temporary_unavailable"]),
                     "automatic_pause": (
-                        bool(row["automatic_pause"])
-                        if "automatic_pause" in row_keys
-                        else False
+                        bool(row["automatic_pause"]) if "automatic_pause" in row_keys else False
                     ),
                 }
             )
@@ -3345,7 +2394,7 @@ class GuardianRepository:
 
     @staticmethod
     def _channel_error_episode_from_row(
-        row: sqlite3.Row,
+        row: Any,
     ) -> GuardianChannelErrorEpisode:
         try:
             return GuardianChannelErrorEpisode.model_validate(
@@ -3367,7 +2416,7 @@ class GuardianRepository:
 
     @staticmethod
     def _account_recovery_run_from_row(
-        row: sqlite3.Row,
+        row: Any,
     ) -> GuardianAccountRecoveryRun:
         try:
             return GuardianAccountRecoveryRun.model_validate(
@@ -3394,7 +2443,7 @@ class GuardianRepository:
 
     @staticmethod
     def _account_recovery_record_from_row(
-        row: sqlite3.Row,
+        row: Any,
     ) -> GuardianAccountRecoveryRecord:
         try:
             return GuardianAccountRecoveryRecord.model_validate(
@@ -3419,7 +2468,7 @@ class GuardianRepository:
             ) from exc
 
     @staticmethod
-    def _channel(row: sqlite3.Row) -> dict[str, Any]:
+    def _channel(row: Any) -> dict[str, Any]:
         try:
             override_json = row["channel_override_json"]
         except IndexError:
@@ -3448,7 +2497,7 @@ class GuardianRepository:
         }
 
     @staticmethod
-    def _run(row: sqlite3.Row) -> dict[str, Any]:
+    def _run(row: Any) -> dict[str, Any]:
         return {
             "run_id": row["run_id"],
             "dry_run": bool(row["dry_run"]),
@@ -3463,7 +2512,7 @@ class GuardianRepository:
         }
 
     @staticmethod
-    def _event(row: sqlite3.Row) -> dict[str, Any]:
+    def _event(row: Any) -> dict[str, Any]:
         return {
             "event_id": row["event_id"],
             "event_type": row["event_type"],

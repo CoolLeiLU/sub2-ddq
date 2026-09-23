@@ -1,4 +1,17 @@
-"""SQLite schema for the Sub2API MCP service."""
+"""PostgreSQL schema for the Sub2API MCP service.
+
+This mirrors the former SQLite schema with the dialect differences that matter:
+
+* ``INTEGER`` flag columns (0/1 with a ``CHECK ... IN (0,1)``) are ``BOOLEAN``;
+* ``TEXT`` columns whose name ends in ``_at`` are ``TIMESTAMPTZ``;
+* ``TEXT`` columns holding JSON are ``JSONB`` where the value is always an
+  object/array, so indexes and operators work naturally;
+* ``rowid``-ordered batched deletes have no equivalent and are rewritten in
+  ``cleanup_retention`` to key on the table's primary key.
+
+Schema versioning keeps the same integer counter as before; migrations are
+applied in order by :meth:`Database.initialize`.
+"""
 
 SCHEMA_VERSION = 8
 
@@ -11,8 +24,8 @@ CREATE TABLE IF NOT EXISTS account_quarantines (
     group_ids_json TEXT NOT NULL,
     threshold_ms INTEGER NOT NULL CHECK (threshold_ms > 0),
     observed_count INTEGER NOT NULL CHECK (observed_count > 0),
-    quarantined_at TEXT NOT NULL,
-    last_probe_at TEXT,
+    quarantined_at TIMESTAMPTZ NOT NULL,
+    last_probe_at TIMESTAMPTZ,
     last_probe_latency_ms INTEGER CHECK (
         last_probe_latency_ms IS NULL OR last_probe_latency_ms >= 0
     ),
@@ -24,13 +37,15 @@ CREATE TABLE IF NOT EXISTS account_quarantines (
     recovery_success_streak INTEGER NOT NULL DEFAULT 0 CHECK (
         recovery_success_streak BETWEEN 0 AND 1
     ),
-    updated_at TEXT NOT NULL
+    updated_at TIMESTAMPTZ NOT NULL
 )
 """
+
 ACCOUNT_QUARANTINE_INDEX_DDL = """
 CREATE INDEX IF NOT EXISTS idx_account_quarantines_probe
     ON account_quarantines(last_probe_at, quarantined_at, account_id)
 """
+
 ACCOUNT_QUARANTINE_TABLE_SQL = (
     f"{ACCOUNT_QUARANTINE_TABLE_DDL};{ACCOUNT_QUARANTINE_INDEX_DDL};"
 )
@@ -45,8 +60,8 @@ CREATE TABLE IF NOT EXISTS account_quarantine_intents (
     threshold_ms INTEGER NOT NULL CHECK (threshold_ms > 0),
     observed_count INTEGER NOT NULL CHECK (observed_count > 0),
     previous_status TEXT NOT NULL CHECK (previous_status IN ('active', 'error')),
-    previous_schedulable INTEGER NOT NULL CHECK (previous_schedulable IN (0, 1)),
-    created_at TEXT NOT NULL
+    previous_schedulable BOOLEAN NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_account_quarantine_intents_created
     ON account_quarantine_intents(created_at, account_id);
@@ -56,7 +71,7 @@ ACCOUNT_QUARANTINE_RESTORE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS account_quarantine_restore_intents (
     account_id TEXT PRIMARY KEY
         REFERENCES account_quarantines(account_id) ON DELETE CASCADE,
-    created_at TEXT NOT NULL
+    created_at TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_account_quarantine_restores_created
     ON account_quarantine_restore_intents(created_at, account_id);
@@ -70,17 +85,17 @@ CREATE TABLE IF NOT EXISTS service_metadata (
 CREATE TABLE IF NOT EXISTS scheduler_state (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TIMESTAMPTZ NOT NULL
 );
 CREATE TABLE IF NOT EXISTS scheduler_lease (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     owner TEXT NOT NULL,
-    expires_at TEXT NOT NULL
+    expires_at TIMESTAMPTZ NOT NULL
 );
 CREATE TABLE IF NOT EXISTS account_control_lease (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     owner TEXT NOT NULL,
-    expires_at TEXT NOT NULL
+    expires_at TIMESTAMPTZ NOT NULL
 );
 CREATE TABLE IF NOT EXISTS jobs (
     job_id TEXT PRIMARY KEY,
@@ -90,12 +105,12 @@ CREATE TABLE IF NOT EXISTS jobs (
     result_json TEXT,
     error_code TEXT,
     error_message TEXT,
-    cancel_requested INTEGER NOT NULL DEFAULT 0,
+    cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
     worker_id TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    started_at TEXT,
-    finished_at TEXT
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL,
+    started_at TIMESTAMPTZ,
+    finished_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_claim
     ON jobs(status, job_type, created_at, job_id);
@@ -105,20 +120,20 @@ CREATE TABLE IF NOT EXISTS account_bindings (
     actor_key TEXT PRIMARY KEY,
     user_id TEXT NOT NULL UNIQUE,
     masked_email TEXT NOT NULL,
-    bound_at TEXT NOT NULL
+    bound_at TIMESTAMPTZ NOT NULL
 );
 {ACCOUNT_QUARANTINE_TABLE_SQL}
 {ACCOUNT_QUARANTINE_INTENT_TABLE_SQL}
 CREATE TABLE IF NOT EXISTS actor_nonces (
     nonce TEXT PRIMARY KEY,
-    expires_at TEXT NOT NULL
+    expires_at TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_actor_nonces_expires
     ON actor_nonces(expires_at, nonce);
 CREATE TABLE IF NOT EXISTS probe_snapshots (
     snapshot_key TEXT PRIMARY KEY,
     payload_json TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TIMESTAMPTZ NOT NULL
 );
 CREATE TABLE IF NOT EXISTS audit_events (
     audit_id TEXT PRIMARY KEY,
@@ -126,8 +141,9 @@ CREATE TABLE IF NOT EXISTS audit_events (
     action TEXT NOT NULL,
     subject TEXT,
     outcome TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_audit_events_created
     ON audit_events(created_at, audit_id);
+{ACCOUNT_QUARANTINE_RESTORE_TABLE_SQL}
 """
