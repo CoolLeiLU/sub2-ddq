@@ -314,9 +314,8 @@ class GuardianEngine:
                 entry_is_fresh = True
             else:
                 entry_observed_at = entry.observed_at
-                entry_is_fresh = (
-                    now - entry_observed_at
-                    <= timedelta(seconds=policy.sampling.fresh_seconds)
+                entry_is_fresh = now - entry_observed_at <= timedelta(
+                    seconds=policy.sampling.fresh_seconds
                 )
             if snapshot_id is not None and captured_at is not None:
                 account_recovery_active = (
@@ -746,4 +745,3 @@ class GuardianEngine:
             "account_recovery_triggers": account_recovery_triggers,
             "channel_mapping_conflicts": channel_mapping_conflicts,
         }
-

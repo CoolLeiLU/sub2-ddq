@@ -52,9 +52,7 @@ class JobManager:
             else:
                 finished = await self._repository.complete_job(job.job_id, result)
         except ServiceError as exc:
-            finished = await self._repository.fail_job(
-                job.job_id, exc.code, exc.safe_message
-            )
+            finished = await self._repository.fail_job(job.job_id, exc.code, exc.safe_message)
         except Exception:
             finished = await self._repository.fail_job(
                 job.job_id,

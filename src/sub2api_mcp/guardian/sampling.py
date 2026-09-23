@@ -106,14 +106,14 @@ def fuse_evidence_buckets(
     *,
     bucket_seconds: int = 60,
 ) -> list[GuardianEvidenceBucket]:
-    grouped: dict[tuple[str, datetime], list[tuple[float, float, int, int | None]]] = (
-        defaultdict(list)
+    grouped: dict[tuple[str, datetime], list[tuple[float, float, int, int | None]]] = defaultdict(
+        list
     )
     sources: dict[tuple[str, datetime], set[GuardianSampleSource]] = defaultdict(set)
 
-    by_source: dict[
-        tuple[str, datetime, GuardianSampleSource], list[GuardianEvidence]
-    ] = defaultdict(list)
+    by_source: dict[tuple[str, datetime, GuardianSampleSource], list[GuardianEvidence]] = (
+        defaultdict(list)
+    )
     for item in evidence:
         by_source[
             (item.channel_id, _bucket_at(item.occurred_at, bucket_seconds), item.source)
@@ -125,9 +125,7 @@ def fuse_evidence_buckets(
                 sum(value.score for value in values) / len(values),
                 reliability,
                 sum(value.event_count for value in values),
-                _nearest_rank_p95(
-                    [value.ttfb_ms for value in values if value.ttfb_ms is not None]
-                ),
+                _nearest_rank_p95([value.ttfb_ms for value in values if value.ttfb_ms is not None]),
             )
         )
         sources[(channel_id, bucket_at)].add(source)

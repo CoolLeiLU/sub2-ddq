@@ -46,8 +46,7 @@ class Sub2APIService:
 
     async def get_status(self) -> dict[str, Any]:
         job_counts = {
-            job_type.value: await self.repository.active_job_count(job_type)
-            for job_type in JobType
+            job_type.value: await self.repository.active_job_count(job_type) for job_type in JobType
         }
         return {
             "version": __version__,
@@ -101,9 +100,7 @@ class Sub2APIService:
         reason: str | None = None,
     ) -> dict[str, Any]:
         try:
-            parsed_reason = (
-                AccountQuarantineReason(reason) if reason is not None else None
-            )
+            parsed_reason = AccountQuarantineReason(reason) if reason is not None else None
         except ValueError as exc:
             raise ServiceError(
                 "VALIDATION_ERROR",
@@ -132,9 +129,7 @@ class Sub2APIService:
             payload = await self._recovery_owner.prepare_recovery_job()
         else:
             payload = {}
-        created = await self.repository.create_job_with_capacity(
-            job_type, payload, max_active=1
-        )
+        created = await self.repository.create_job_with_capacity(job_type, payload, max_active=1)
         if created is None:
             raise ServiceError("JOB_ALREADY_ACTIVE", "A job of this type is already active")
         job, queue_count = created
@@ -147,9 +142,7 @@ class Sub2APIService:
             raise ServiceError(
                 "ACCOUNT_NOT_BINDABLE", "The account does not exist or is not active"
             )
-        binding = await self.repository.bind_actor(
-            key, account.user_id, account.email_masked
-        )
+        binding = await self.repository.bind_actor(key, account.user_id, account.email_masked)
         return {
             "masked_email": binding.masked_email,
             "bound_at": binding.bound_at.isoformat(),
@@ -162,9 +155,7 @@ class Sub2APIService:
     async def cancel_job(self, job_id: str) -> dict[str, Any]:
         return (await self.repository.cancel_job(job_id)).model_dump(mode="json")
 
-    async def audit(
-        self, principal: str, action: str, subject: str | None, outcome: str
-    ) -> None:
+    async def audit(self, principal: str, action: str, subject: str | None, outcome: str) -> None:
         await self.repository.audit(principal, action, subject, outcome)
 
     @staticmethod

@@ -191,4 +191,3 @@ class Metrics:
 
     def render(self) -> bytes:
         return generate_latest(self.registry)
-

@@ -98,10 +98,8 @@ def _monitor_probe_is_fresh(
         )
     except ValueError:
         return False
-    return (
-        observed_at is not None
-        and (now - observed_at).total_seconds() <= max_age_seconds
-    )
+    return observed_at is not None and (now - observed_at).total_seconds() <= max_age_seconds
+
 
 BeforeQuarantine = Callable[[dict[str, object]], Awaitable[None]]
 AfterQuarantine = Callable[[str, bool, bool], Awaitable[None]]
@@ -224,11 +222,7 @@ class LegacySub2APIAdapter:
         # served; vip variants and groups without a bound channel stay
         # unresolved.  The admin group list is the authoritative managed
         # scope.
-        bound = frozenset(
-            probe.accounts.group_id
-            for probe in probes
-            if probe.accounts is not None
-        )
+        bound = frozenset(probe.accounts.group_id for probe in probes if probe.accounts is not None)
         return bound | await self._client.fetch_known_group_ids()
 
     @staticmethod
@@ -243,17 +237,9 @@ class LegacySub2APIAdapter:
         # permanent skip.  Non-active accounts with a stale deadline are also
         # eligible for the recovery path because their status is already an
         # explicit system-abnormal signal.
-        if (
-            state.temporary_unavailable
-            and state.status == "active"
-            and not state.automatic_pause
-        ):
+        if state.temporary_unavailable and state.status == "active" and not state.automatic_pause:
             return "temporary_unavailable"
-        if (
-            state.status == "active"
-            and state.schedulable is False
-            and not state.automatic_pause
-        ):
+        if state.status == "active" and state.schedulable is False and not state.automatic_pause:
             return "manual_pause"
         return None
 
@@ -357,15 +343,11 @@ class LegacySub2APIAdapter:
             if state.success
             else "account_state_unavailable"
         )
-        if (
-            blocked == "manual_pause"
-            and initial_account.status
-            in {
-                GuardianAccountStatus.ERROR,
-                GuardianAccountStatus.DISABLED,
-                GuardianAccountStatus.INACTIVE,
-            }
-        ):
+        if blocked == "manual_pause" and initial_account.status in {
+            GuardianAccountStatus.ERROR,
+            GuardianAccountStatus.DISABLED,
+            GuardianAccountStatus.INACTIVE,
+        }:
             blocked = None
         if blocked == "manual_pause" and initial_account.automatic_pause:
             # Some Sub2API versions expose the automatic reason on the list
@@ -388,8 +370,7 @@ class LegacySub2APIAdapter:
                 reason=blocked,
                 observed_status=initial_account.status,
                 observed_schedulable=initial_account.schedulable,
-                observed_automatic_pause=initial_account.automatic_pause
-                or state.automatic_pause,
+                observed_automatic_pause=initial_account.automatic_pause or state.automatic_pause,
             )
         model_id = model_id.strip()
         if not model_id:
@@ -420,8 +401,7 @@ class LegacySub2APIAdapter:
             attempted=True,
             observed_status=initial_account.status,
             observed_schedulable=initial_account.schedulable,
-            observed_automatic_pause=initial_account.automatic_pause
-            or state.automatic_pause,
+            observed_automatic_pause=initial_account.automatic_pause or state.automatic_pause,
         )
 
     async def guardian_enable_account(
@@ -593,14 +573,10 @@ class LegacySub2APIAdapter:
     async def guardian_list_channel_monitors(self) -> list[AdminMonitorSummary]:
         return await self._client.list_channel_monitors()
 
-    async def guardian_list_group_api_keys(
-        self, group_id: str
-    ) -> list[AdminGroupApiKey]:
+    async def guardian_list_group_api_keys(self, group_id: str) -> list[AdminGroupApiKey]:
         return await self._client.list_group_api_keys(group_id)
 
-    async def guardian_fetch_endpoint_models(
-        self, endpoint: str, api_key: str
-    ) -> list[str]:
+    async def guardian_fetch_endpoint_models(self, endpoint: str, api_key: str) -> list[str]:
         return await self._client.fetch_endpoint_models(endpoint, api_key)
 
     async def guardian_rebind_channel(
@@ -641,9 +617,7 @@ class LegacySub2APIAdapter:
                 "status": channel.status,
                 "group_id": accounts.group_id if accounts is not None else None,
                 "group_name": accounts.name if accounts is not None else None,
-                "available_count": (
-                    accounts.available_count if accounts is not None else None
-                ),
+                "available_count": (accounts.available_count if accounts is not None else None),
                 "error_count": accounts.error_count if accounts is not None else None,
                 "temporary_unavailable_count": (
                     accounts.temporary_unavailable_count if accounts is not None else None
@@ -698,9 +672,7 @@ class LegacySub2APIAdapter:
         now = datetime.now(UTC)
         cached_at = self._last_probe_captured_at
         cache_matches_probe = (
-            probe.captured_at is None
-            or cached_at is not None
-            and cached_at == probe.captured_at
+            probe.captured_at is None or cached_at is not None and cached_at == probe.captured_at
         )
         cache_is_fresh = (
             cached_at is not None
@@ -901,8 +873,7 @@ class LegacySub2APIAdapter:
         if not tested.success:
             return "KEEP"
         if marker.reason is AccountQuarantineReason.SLOW_FIRST_TOKEN and (
-            tested.first_event_ms is None
-            or tested.first_event_ms > marker.threshold_ms
+            tested.first_event_ms is None or tested.first_event_ms > marker.threshold_ms
         ):
             return "KEEP"
         restore_started = datetime.now(UTC)

@@ -24,6 +24,7 @@ __all__ = [
     "placeholders",
     "renumber",
     "row_to_dict",
+    "rowcount",
 ]
 
 
@@ -88,6 +89,23 @@ def renumber(query: str, offset: int) -> str:
         lambda match: f"${int(match.group(1)) + offset}",
         query,
     )
+
+
+def rowcount(status: str | None) -> int:
+    """Extract the affected row count from an ``asyncpg`` command status.
+
+    ``asyncpg`` returns strings such as ``"UPDATE 3"`` or ``"DELETE 0"`` where
+    SQLite exposed ``Cursor.rowcount``.  Returning 0 for an unparsable status
+    keeps callers that only log the number safe.
+    """
+
+    if not status:
+        return 0
+    _, _, tail = status.rpartition(" ")
+    try:
+        return int(tail)
+    except ValueError:
+        return 0
 
 
 def row_to_dict(row: Any | None) -> dict[str, Any] | None:
@@ -155,9 +173,8 @@ class Database:
         the lease and snapshot-claim methods.
         """
 
-        async with self.pool.acquire() as connection:
-            async with connection.transaction():
-                yield connection
+        async with self.pool.acquire() as connection, connection.transaction():
+            yield connection
 
     async def execute(self, query: str, *args: Any) -> str:
         async with self.acquire() as connection:

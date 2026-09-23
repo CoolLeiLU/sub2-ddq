@@ -196,17 +196,13 @@ class GuardianAccountRecoveryDecision(StrictModel):
 
 class GuardianAccountRecoverySelection(StrictModel):
     trigger: AccountRecoveryRunTrigger
-    decisions: tuple[GuardianAccountRecoveryDecision, ...] = Field(
-        max_length=10_000
-    )
+    decisions: tuple[GuardianAccountRecoveryDecision, ...] = Field(max_length=10_000)
     selected_account_ids: tuple[str, ...] = Field(max_length=10_000)
     global_block_reason: str | None = Field(default=None, max_length=200)
 
     @model_validator(mode="after")
     def validate_selected_accounts(self) -> GuardianAccountRecoverySelection:
-        expected = tuple(
-            item.account.account_id for item in self.decisions if item.selected
-        )
+        expected = tuple(item.account.account_id for item in self.decisions if item.selected)
         if expected != self.selected_account_ids:
             raise ValueError("selected account IDs do not match decisions")
         return self
@@ -434,9 +430,7 @@ class ScopePolicy(StrictModel):
 
 class ModelPlazaPolicy(StrictModel):
     enabled: bool = True
-    refresh_times: tuple[str, ...] = Field(
-        default=("00:00", "12:00"), min_length=1, max_length=8
-    )
+    refresh_times: tuple[str, ...] = Field(default=("00:00", "12:00"), min_length=1, max_length=8)
 
     @field_validator("refresh_times")
     @classmethod
@@ -459,12 +453,8 @@ class GuardianPolicy(StrictModel):
     traffic: TrafficPolicy = Field(default_factory=TrafficPolicy)
     sampling: SamplingPolicy = Field(default_factory=SamplingPolicy)
     confidence: ConfidencePolicy = Field(default_factory=ConfidencePolicy)
-    recovery_budget: RecoveryProbeBudgetPolicy = Field(
-        default_factory=RecoveryProbeBudgetPolicy
-    )
-    account_recovery: AccountRecoveryPolicy = Field(
-        default_factory=AccountRecoveryPolicy
-    )
+    recovery_budget: RecoveryProbeBudgetPolicy = Field(default_factory=RecoveryProbeBudgetPolicy)
+    account_recovery: AccountRecoveryPolicy = Field(default_factory=AccountRecoveryPolicy)
     scope: ScopePolicy = Field(default_factory=ScopePolicy)
     model_plaza: ModelPlazaPolicy = Field(default_factory=ModelPlazaPolicy)
 
@@ -497,9 +487,7 @@ class GuardianPolicy(StrictModel):
             migrated["confidence"] = confidence
         raw_probe = migrated.get("probe")
         probe: dict[str, object] = (
-            dict(cast(dict[str, object], raw_probe))
-            if isinstance(raw_probe, dict)
-            else {}
+            dict(cast(dict[str, object], raw_probe)) if isinstance(raw_probe, dict) else {}
         )
         raw_interval = probe.get("interval_seconds")
         if (
@@ -511,9 +499,7 @@ class GuardianPolicy(StrictModel):
         migrated["probe"] = probe
         raw_recovery = migrated.get("account_recovery")
         account_recovery: dict[str, object] = (
-            dict(cast(dict[str, object], raw_recovery))
-            if isinstance(raw_recovery, dict)
-            else {}
+            dict(cast(dict[str, object], raw_recovery)) if isinstance(raw_recovery, dict) else {}
         )
         account_recovery.update(
             {

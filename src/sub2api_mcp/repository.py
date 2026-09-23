@@ -2,17 +2,15 @@
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import hashlib
 import json
-import sqlite3
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Any, cast
 
+import asyncpg
 from pydantic import ValidationError
 
 from .contracts import (
@@ -28,13 +26,10 @@ from .contracts import (
     JobType,
     QuarantineProbeResult,
 )
+from .db import Database
+from .db import rowcount as _rowcount
 from .errors import ServiceError
-from .schema import (
-    ACCOUNT_QUARANTINE_INDEX_DDL,
-    ACCOUNT_QUARANTINE_RESTORE_TABLE_SQL,
-    ACCOUNT_QUARANTINE_TABLE_DDL,
-    SCHEMA_SQL,
-)
+from .schema import ACCOUNT_QUARANTINE_RESTORE_TABLE_SQL, SCHEMA_SQL
 from .schema import SCHEMA_VERSION as CURRENT_SCHEMA_VERSION
 
 
@@ -48,9 +43,11 @@ def _iso(value: datetime) -> str:
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
-def _datetime(value: str | None) -> datetime | None:
+def _datetime(value: str | datetime | None) -> datetime | None:
     if value is None:
         return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
@@ -62,199 +59,77 @@ class SqliteRepository:
     SCHEMA_VERSION = CURRENT_SCHEMA_VERSION
     MAX_ACCOUNT_QUARANTINES = 10_000
 
-    def __init__(self, path: Path, *, clock: Callable[[], datetime] = _utc_now) -> None:
-        self.path = path
+    def __init__(self, database: Database, *, clock: Callable[[], datetime] = _utc_now) -> None:
+        self._database = database
         self._clock = clock
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=30, isolation_level=None)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA busy_timeout = 30000")
-        connection.execute("PRAGMA journal_mode = WAL")
-        return connection
-
     async def initialize(self) -> None:
-        await asyncio.to_thread(self._initialize_sync)
+        """Create the schema and mark interrupted work as resumable.
 
-    def _initialize_sync(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        now = _iso(self._clock())
-        with self._connect() as connection:
-            current_version = self._current_schema_version(connection)
-            if current_version > self.SCHEMA_VERSION:
-                raise RuntimeError("database schema is newer than this service")
-            connection.executescript(SCHEMA_SQL)
-            if current_version == 2:
-                self._migrate_quarantine_probe_result(connection)
-            if current_version < 7:
-                self._migrate_quarantine_recovery_streak(connection)
-            if current_version < 8:
-                connection.execute("DROP TABLE IF EXISTS notification_deliveries")
-                connection.execute("DROP TABLE IF EXISTS notification_outbox")
-                connection.execute("DROP TABLE IF EXISTS delivery_targets")
-            connection.executescript(ACCOUNT_QUARANTINE_RESTORE_TABLE_SQL)
-            connection.execute(
-                "INSERT INTO service_metadata(key, value) VALUES('schema_version', ?) "
+        The legacy SQLite repository upgraded an existing file through
+        ``_current_schema_version`` plus three migration helpers.  A fresh
+        PostgreSQL deployment always starts at the current shape, so only the
+        restart reconciliation below is retained; historical rows move across
+        through ``scripts/migrate_sqlite_to_postgres.py``.
+        """
+
+        now = self._clock()
+        async with self._database.transaction() as connection:
+            for statement in SCHEMA_SQL.split(";"):
+                if statement.strip():
+                    await connection.execute(statement)
+            # Kept separate from SCHEMA_SQL: this table references
+            # account_quarantines and must be created after it exists.
+            for statement in ACCOUNT_QUARANTINE_RESTORE_TABLE_SQL.split(";"):
+                if statement.strip():
+                    await connection.execute(statement)
+            await connection.execute(
+                "INSERT INTO service_metadata(key, value) VALUES('schema_version', $1) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                (str(self.SCHEMA_VERSION),),
+                str(self.SCHEMA_VERSION),
             )
-            connection.execute(
-                "UPDATE jobs SET status = ?, error_code = ?, error_message = ?, "
-                "updated_at = ?, finished_at = ?, worker_id = NULL "
-                "WHERE status = ?",
-                (
-                    JobStatus.INTERRUPTED.value,
-                    "SERVICE_RESTARTED",
-                    "The service restarted while this job was running",
-                    now,
-                    now,
-                    JobStatus.RUNNING.value,
-                ),
+            await connection.execute(
+                "UPDATE jobs SET status = $1, error_code = $2, error_message = $3, "
+                "updated_at = $4, finished_at = $5, worker_id = NULL "
+                "WHERE status = $6",
+                JobStatus.INTERRUPTED.value,
+                "SERVICE_RESTARTED",
+                "The service restarted while this job was running",
+                now,
+                now,
+                JobStatus.RUNNING.value,
             )
-            connection.execute(
-                "UPDATE jobs SET status = ?, error_code = ?, error_message = ?, "
-                "updated_at = ?, finished_at = ?, worker_id = NULL "
-                "WHERE job_type = ? AND status IN (?, ?)",
-                (
-                    JobStatus.FAILED.value,
-                    "VIDEO_REMOVED",
-                    "Video generation is no longer supported",
-                    now,
-                    now,
-                    JobType.VIDEO.value,
-                    JobStatus.QUEUED.value,
-                    JobStatus.RUNNING.value,
-                ),
+            # Video generation was removed from the service; any job still
+            # queued or running for it can never complete.
+            await connection.execute(
+                "UPDATE jobs SET status = $1, error_code = $2, error_message = $3, "
+                "updated_at = $4, finished_at = $5, worker_id = NULL "
+                "WHERE job_type = $6 AND status IN ($7, $8)",
+                JobStatus.FAILED.value,
+                "VIDEO_REMOVED",
+                "Video generation is no longer supported",
+                now,
+                now,
+                JobType.VIDEO.value,
+                JobStatus.QUEUED.value,
+                JobStatus.RUNNING.value,
             )
-
-    @staticmethod
-    def _current_schema_version(connection: sqlite3.Connection) -> int:
-        metadata_exists = connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-            ("service_metadata",),
-        ).fetchone()
-        if metadata_exists is None:
-            return 0
-        row = connection.execute(
-            "SELECT value FROM service_metadata WHERE key = ?",
-            ("schema_version",),
-        ).fetchone()
-        if row is None:
-            return 0
-        try:
-            version = int(row["value"])
-        except (TypeError, ValueError) as exc:
-            raise RuntimeError("database schema version is invalid") from exc
-        if version < 0:
-            raise RuntimeError("database schema version is invalid")
-        return version
-
-    @staticmethod
-    def _migrate_quarantine_probe_result(connection: sqlite3.Connection) -> None:
-        table_exists = connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-            ("account_quarantines",),
-        ).fetchone()
-        if table_exists is None:
-            return
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            connection.execute("DROP INDEX IF EXISTS idx_account_quarantines_probe")
-            connection.execute(
-                "ALTER TABLE account_quarantines RENAME TO account_quarantines_v2"
-            )
-            connection.execute(ACCOUNT_QUARANTINE_TABLE_DDL)
-            connection.execute(ACCOUNT_QUARANTINE_INDEX_DDL)
-            connection.execute(
-                "INSERT INTO account_quarantines("
-                "account_id, reason, group_ids_json, threshold_ms, observed_count, "
-                "quarantined_at, last_probe_at, last_probe_latency_ms, "
-                "last_probe_result, updated_at"
-                ") SELECT account_id, reason, group_ids_json, threshold_ms, "
-                "observed_count, quarantined_at, last_probe_at, last_probe_latency_ms, "
-                "CASE WHEN last_probe_result = 'SUCCESS' THEN 'RECOVERED' "
-                "ELSE last_probe_result END, updated_at FROM account_quarantines_v2"
-            )
-            connection.execute("DROP TABLE account_quarantines_v2")
-            connection.execute("COMMIT")
-        except Exception:
-            connection.execute("ROLLBACK")
-            raise
-
-    @staticmethod
-    def _migrate_quarantine_recovery_streak(
-        connection: sqlite3.Connection,
-    ) -> None:
-        columns = {
-            str(row["name"])
-            for row in connection.execute(
-                "PRAGMA table_info(account_quarantines)"
-            ).fetchall()
-        }
-        if "recovery_success_streak" in columns:
-            return
-        restore_table_exists = connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-            ("account_quarantine_restore_intents",),
-        ).fetchone() is not None
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            connection.execute("DROP INDEX IF EXISTS idx_account_quarantines_probe")
-            if restore_table_exists:
-                connection.execute(
-                    "DROP INDEX IF EXISTS idx_account_quarantine_restores_created"
-                )
-                connection.execute(
-                    "ALTER TABLE account_quarantine_restore_intents "
-                    "RENAME TO account_quarantine_restore_intents_v6"
-                )
-            connection.execute(
-                "ALTER TABLE account_quarantines RENAME TO account_quarantines_v6"
-            )
-            connection.execute(ACCOUNT_QUARANTINE_TABLE_DDL)
-            connection.execute(ACCOUNT_QUARANTINE_INDEX_DDL)
-            connection.execute(
-                "INSERT INTO account_quarantines("
-                "account_id, reason, group_ids_json, threshold_ms, observed_count, "
-                "quarantined_at, last_probe_at, last_probe_latency_ms, "
-                "last_probe_result, recovery_success_streak, updated_at"
-                ") SELECT account_id, reason, group_ids_json, threshold_ms, "
-                "observed_count, quarantined_at, last_probe_at, last_probe_latency_ms, "
-                "last_probe_result, 0, updated_at FROM account_quarantines_v6"
-            )
-            if restore_table_exists:
-                for statement in ACCOUNT_QUARANTINE_RESTORE_TABLE_SQL.split(";"):
-                    if statement.strip():
-                        connection.execute(statement)
-                connection.execute(
-                    "INSERT INTO account_quarantine_restore_intents(account_id, created_at) "
-                    "SELECT account_id, created_at "
-                    "FROM account_quarantine_restore_intents_v6"
-                )
-                connection.execute(
-                    "DROP TABLE account_quarantine_restore_intents_v6"
-                )
-            connection.execute("DROP TABLE account_quarantines_v6")
-            connection.execute("COMMIT")
-        except Exception:
-            if connection.in_transaction:
-                connection.execute("ROLLBACK")
-            raise
 
     async def create_job(self, job_type: JobType, payload: dict[str, Any]) -> JobRecord:
-        return await asyncio.to_thread(self._create_job_sync, job_type, payload)
-
-    def _create_job_sync(self, job_type: JobType, payload: dict[str, Any]) -> JobRecord:
         job_id = str(uuid.uuid4())
-        now = _iso(self._clock())
-        with self._connect() as connection:
-            connection.execute(
+        now = self._clock()
+        async with self._database.acquire() as connection:
+            await connection.execute(
                 "INSERT INTO jobs(job_id, job_type, status, payload_json, created_at, updated_at) "
-                "VALUES(?, ?, ?, ?, ?, ?)",
-                (job_id, job_type.value, JobStatus.QUEUED.value, _json(payload), now, now),
+                "VALUES($1, $2, $3, $4, $5, $6)",
+                job_id,
+                job_type.value,
+                JobStatus.QUEUED.value,
+                _json(payload),
+                now,
+                now,
             )
-            row = connection.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+            row = await connection.fetchrow("SELECT * FROM jobs WHERE job_id = $1", job_id)
         assert row is not None
         return self._job_from_row(row)
 
@@ -265,66 +140,48 @@ class SqliteRepository:
         *,
         max_active: int,
     ) -> tuple[JobRecord, int] | None:
-        return await asyncio.to_thread(
-            self._create_job_with_capacity_sync, job_type, payload, max_active
-        )
-
-    def _create_job_with_capacity_sync(
-        self,
-        job_type: JobType,
-        payload: dict[str, Any],
-        max_active: int,
-    ) -> tuple[JobRecord, int] | None:
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
+        job_id = str(uuid.uuid4())
+        now = self._clock()
+        async with self._database.transaction() as connection:
             active = int(
-                connection.execute(
-                    "SELECT COUNT(*) FROM jobs WHERE job_type = ? AND status IN (?, ?)",
-                    (
-                        job_type.value,
-                        JobStatus.QUEUED.value,
-                        JobStatus.RUNNING.value,
-                    ),
-                ).fetchone()[0]
+                await connection.fetchval(
+                    "SELECT COUNT(*) FROM jobs WHERE job_type = $1 AND status IN ($2, $3)",
+                    job_type.value,
+                    JobStatus.QUEUED.value,
+                    JobStatus.RUNNING.value,
+                )
+                or 0
             )
             if active >= max_active:
-                connection.execute("COMMIT")
                 return None
-            job_id = str(uuid.uuid4())
-            now = _iso(self._clock())
-            connection.execute(
+            await connection.execute(
                 "INSERT INTO jobs(job_id, job_type, status, payload_json, created_at, updated_at) "
-                "VALUES(?, ?, ?, ?, ?, ?)",
-                (job_id, job_type.value, JobStatus.QUEUED.value, _json(payload), now, now),
+                "VALUES($1, $2, $3, $4, $5, $6)",
+                job_id,
+                job_type.value,
+                JobStatus.QUEUED.value,
+                _json(payload),
+                now,
+                now,
             )
-            row = connection.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
-            connection.execute("COMMIT")
-        except Exception:
-            connection.execute("ROLLBACK")
-            raise
-        finally:
-            connection.close()
-        assert row is not None
+            row = await connection.fetchrow("SELECT * FROM jobs WHERE job_id = $1", job_id)
+        if row is None:
+            raise RuntimeError("job disappeared after insert")
         return self._job_from_row(row), active + 1
 
     async def active_job_count(self, job_type: JobType) -> int:
-        return await asyncio.to_thread(self._active_job_count_sync, job_type)
-
-    def _active_job_count_sync(self, job_type: JobType) -> int:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT COUNT(*) AS count FROM jobs WHERE job_type = ? AND status IN (?, ?)",
-                (job_type.value, JobStatus.QUEUED.value, JobStatus.RUNNING.value),
-            ).fetchone()
-        return int(row["count"] if row is not None else 0)
+        async with self._database.acquire() as connection:
+            value = await connection.fetchval(
+                "SELECT COUNT(*) FROM jobs WHERE job_type = $1 AND status IN ($2, $3)",
+                job_type.value,
+                JobStatus.QUEUED.value,
+                JobStatus.RUNNING.value,
+            )
+        return int(value or 0)
 
     async def get_job(self, job_id: str) -> JobRecord | None:
-        return await asyncio.to_thread(self._get_job_sync, job_id)
-
-    def _get_job_sync(self, job_id: str) -> JobRecord | None:
-        with self._connect() as connection:
-            row = connection.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+        async with self._database.acquire() as connection:
+            row = await connection.fetchrow("SELECT * FROM jobs WHERE job_id = $1", job_id)
         return self._job_from_row(row) if row is not None else None
 
     @staticmethod
@@ -350,18 +207,6 @@ class SqliteRepository:
 
     async def list_jobs(
         self,
-        *,
-        limit: int = 20,
-        cursor: str | None = None,
-        job_type: JobType | None = None,
-        status: JobStatus | None = None,
-    ) -> JobPage:
-        return await asyncio.to_thread(
-            self._list_jobs_sync, limit, cursor, job_type, status
-        )
-
-    def _list_jobs_sync(
-        self,
         limit: int,
         cursor: str | None,
         job_type: JobType | None,
@@ -383,11 +228,11 @@ class SqliteRepository:
             parameters.extend((created_at, created_at, job_id))
         where = "WHERE " + " AND ".join(conditions) if conditions else ""
         parameters.append(limit + 1)
-        with self._connect() as connection:
-            rows = connection.execute(
-                f"SELECT * FROM jobs {where} ORDER BY created_at DESC, job_id DESC LIMIT ?",
+        async with self._database.acquire() as connection:
+            rows = await connection.fetch(
+                f"SELECT * FROM jobs {where} ORDER BY created_at DESC, job_id DESC LIMIT $1",
                 parameters,
-            ).fetchall()
+            )
         has_more = len(rows) > limit
         selected = rows[:limit]
         next_cursor = None
@@ -395,65 +240,46 @@ class SqliteRepository:
             next_cursor = self._encode_cursor(selected[-1]["created_at"], selected[-1]["job_id"])
         return JobPage(items=[self._job_from_row(row) for row in selected], next_cursor=next_cursor)
 
-    async def claim_next_job(
-        self, job_types: set[JobType], worker_id: str
-    ) -> JobRecord | None:
-        return await asyncio.to_thread(self._claim_next_job_sync, job_types, worker_id)
-
-    def _claim_next_job_sync(
-        self, job_types: set[JobType], worker_id: str
-    ) -> JobRecord | None:
+    async def claim_next_job(self, job_types: set[JobType], worker_id: str) -> JobRecord | None:
         if not job_types:
             return None
-        now = _iso(self._clock())
+        now = self._clock()
         values = sorted(item.value for item in job_types)
-        placeholders = ",".join("?" for _ in values)
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                f"SELECT * FROM jobs WHERE status = ? AND job_type IN ({placeholders}) "
-                "ORDER BY created_at, job_id LIMIT 1",
-                [JobStatus.QUEUED.value, *values],
-            ).fetchone()
-            if row is None:
-                connection.execute("COMMIT")
-                return None
-            connection.execute(
-                "UPDATE jobs SET status = ?, worker_id = ?, started_at = ?, updated_at = ? "
-                "WHERE job_id = ? AND status = ?",
-                (
-                    JobStatus.RUNNING.value,
-                    worker_id,
-                    now,
-                    now,
-                    row["job_id"],
-                    JobStatus.QUEUED.value,
-                ),
+        # ``SKIP LOCKED`` lets concurrent workers each take a different queued
+        # job, reproducing the serialization SQLite's write lock provided.
+        async with self._database.transaction() as connection:
+            row = await connection.fetchrow(
+                "SELECT * FROM jobs WHERE status = $1 AND job_type = ANY($2::text[]) "
+                "ORDER BY created_at, job_id LIMIT 1 FOR UPDATE SKIP LOCKED",
+                JobStatus.QUEUED.value,
+                values,
             )
-            claimed = connection.execute(
-                "SELECT * FROM jobs WHERE job_id = ?", (row["job_id"],)
-            ).fetchone()
-            connection.execute("COMMIT")
-        except Exception:
-            connection.execute("ROLLBACK")
-            raise
-        finally:
-            connection.close()
-        assert claimed is not None
+            if row is None:
+                return None
+            await connection.execute(
+                "UPDATE jobs SET status = $1, worker_id = $2, started_at = $3, updated_at = $4 "
+                "WHERE job_id = $5 AND status = $6",
+                JobStatus.RUNNING.value,
+                worker_id,
+                now,
+                now,
+                row["job_id"],
+                JobStatus.QUEUED.value,
+            )
+            claimed = await connection.fetchrow(
+                "SELECT * FROM jobs WHERE job_id = $1", row["job_id"]
+            )
+        if claimed is None:
+            raise RuntimeError("claimed job disappeared")
         return self._job_from_row(claimed)
 
     async def complete_job(self, job_id: str, result: dict[str, Any]) -> JobRecord:
-        return await asyncio.to_thread(
-            self._finish_job_sync, job_id, JobStatus.SUCCEEDED, result, None, None
-        )
+        return await self._finish_job(job_id, JobStatus.SUCCEEDED, result, None, None)
 
     async def fail_job(self, job_id: str, error_code: str, message: str) -> JobRecord:
-        return await asyncio.to_thread(
-            self._finish_job_sync, job_id, JobStatus.FAILED, None, error_code, message
-        )
+        return await self._finish_job(job_id, JobStatus.FAILED, None, error_code, message)
 
-    def _finish_job_sync(
+    async def _finish_job(
         self,
         job_id: str,
         status: JobStatus,
@@ -461,127 +287,103 @@ class SqliteRepository:
         error_code: str | None,
         error_message: str | None,
     ) -> JobRecord:
-        now = _iso(self._clock())
-        with self._connect() as connection:
-            updated = connection.execute(
-                "UPDATE jobs SET status = ?, result_json = ?, error_code = ?, error_message = ?, "
-                "updated_at = ?, finished_at = ?, worker_id = NULL WHERE job_id = ? AND status = ?",
-                (
-                    status.value,
-                    _json(result) if result is not None else None,
-                    error_code,
-                    error_message,
-                    now,
-                    now,
-                    job_id,
-                    JobStatus.RUNNING.value,
-                ),
+        now = self._clock()
+        async with self._database.acquire() as connection:
+            status_text = await connection.execute(
+                "UPDATE jobs SET status = $1, result_json = $2, error_code = $3, "
+                "error_message = $4, updated_at = $5, finished_at = $6, worker_id = NULL "
+                "WHERE job_id = $7 AND status = $8",
+                status.value,
+                _json(result) if result is not None else None,
+                error_code,
+                error_message,
+                now,
+                now,
+                job_id,
+                JobStatus.RUNNING.value,
             )
-            if updated.rowcount != 1:
+            if _rowcount(status_text) != 1:
                 raise ServiceError("INVALID_JOB_STATE", "The job is not running")
-            row = connection.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
-        assert row is not None
+            row = await connection.fetchrow("SELECT * FROM jobs WHERE job_id = $1", job_id)
+        if row is None:
+            raise RuntimeError("finished job disappeared")
         return self._job_from_row(row)
 
     async def cancel_job(self, job_id: str) -> JobRecord:
-        return await asyncio.to_thread(self._cancel_job_sync, job_id)
-
-    def _cancel_job_sync(self, job_id: str) -> JobRecord:
-        now = _iso(self._clock())
-        with self._connect() as connection:
-            row = connection.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+        now = self._clock()
+        async with self._database.acquire() as connection:
+            row = await connection.fetchrow("SELECT * FROM jobs WHERE job_id = $1", job_id)
             if row is None:
                 raise ServiceError("JOB_NOT_FOUND", "The job does not exist")
             status = JobStatus(row["status"])
             if status is JobStatus.QUEUED:
-                connection.execute(
-                    "UPDATE jobs SET status = ?, cancel_requested = 1, updated_at = ?, "
-                    "finished_at = ? WHERE job_id = ?",
-                    (JobStatus.CANCELLED.value, now, now, job_id),
-                )
-            elif status is JobStatus.RUNNING:
-                connection.execute(
-                    "UPDATE jobs SET cancel_requested = 1, updated_at = ? WHERE job_id = ?",
-                    (now, job_id),
-                )
-            row = connection.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
-        assert row is not None
-        return self._job_from_row(row)
-
-    async def mark_running_job_cancelled(self, job_id: str) -> JobRecord:
-        return await asyncio.to_thread(self._mark_running_job_cancelled_sync, job_id)
-
-    def _mark_running_job_cancelled_sync(self, job_id: str) -> JobRecord:
-        now = _iso(self._clock())
-        with self._connect() as connection:
-            updated = connection.execute(
-                "UPDATE jobs SET status = ?, cancel_requested = 1, updated_at = ?, "
-                "finished_at = ?, worker_id = NULL WHERE job_id = ? AND status = ?",
-                (
+                await connection.execute(
+                    "UPDATE jobs SET status = $1, cancel_requested = 1, updated_at = $2, "
+                    "finished_at = $3 WHERE job_id = $4",
                     JobStatus.CANCELLED.value,
                     now,
                     now,
                     job_id,
-                    JobStatus.RUNNING.value,
-                ),
+                )
+            elif status is JobStatus.RUNNING:
+                await connection.execute(
+                    "UPDATE jobs SET cancel_requested = 1, updated_at = $1 WHERE job_id = $2",
+                    now,
+                    job_id,
+                )
+            row = await connection.fetchrow("SELECT * FROM jobs WHERE job_id = $1", job_id)
+        assert row is not None
+        return self._job_from_row(row)
+
+    async def mark_running_job_cancelled(self, job_id: str) -> JobRecord:
+        now = self._clock()
+        async with self._database.acquire() as connection:
+            updated = await connection.execute(
+                "UPDATE jobs SET status = $1, cancel_requested = 1, updated_at = $2, "
+                "finished_at = $3, worker_id = NULL WHERE job_id = $4 AND status = $5",
+                JobStatus.CANCELLED.value,
+                now,
+                now,
+                job_id,
+                JobStatus.RUNNING.value,
             )
             if updated.rowcount != 1:
                 raise ServiceError("INVALID_JOB_STATE", "The job is not running")
-            row = connection.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+            row = await connection.fetchrow("SELECT * FROM jobs WHERE job_id = $1", job_id)
         assert row is not None
         return self._job_from_row(row)
 
     async def acquire_scheduler_lease(self, owner: str, *, lease_seconds: int) -> bool:
-        return await asyncio.to_thread(self._acquire_scheduler_lease_sync, owner, lease_seconds)
-
-    def _acquire_scheduler_lease_sync(self, owner: str, lease_seconds: int) -> bool:
         now = self._clock().astimezone(UTC)
-        expires = _iso(now + timedelta(seconds=lease_seconds))
-        now_text = _iso(now)
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                "SELECT owner, expires_at FROM scheduler_lease WHERE singleton = 1"
-            ).fetchone()
-            if row is not None and row["owner"] != owner and row["expires_at"] > now_text:
-                connection.execute("COMMIT")
+        expires = now + timedelta(seconds=lease_seconds)
+        async with self._database.transaction() as connection:
+            row = await connection.fetchrow(
+                "SELECT owner, expires_at FROM scheduler_lease WHERE singleton = 1 FOR UPDATE"
+            )
+            if row is not None and row["owner"] != owner and row["expires_at"] > now:
                 return False
-            connection.execute(
-                "INSERT INTO scheduler_lease(singleton, owner, expires_at) VALUES(1, ?, ?) "
+            await connection.execute(
+                "INSERT INTO scheduler_lease(singleton, owner, expires_at) VALUES(1, $1, $2) "
                 "ON CONFLICT(singleton) DO UPDATE SET owner = excluded.owner, "
                 "expires_at = excluded.expires_at",
-                (owner, expires),
+                owner,
+                expires,
             )
-            connection.execute("COMMIT")
-            return True
-        except Exception:
-            connection.execute("ROLLBACK")
-            raise
-        finally:
-            connection.close()
+        return True
 
     async def upsert_account_quarantine(
         self,
         record: AccountQuarantineRecord,
     ) -> AccountQuarantineRecord:
-        return await asyncio.to_thread(self._upsert_account_quarantine_sync, record)
-
-    def _upsert_account_quarantine_sync(
-        self,
-        record: AccountQuarantineRecord,
-    ) -> AccountQuarantineRecord:
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                "SELECT * FROM account_quarantines WHERE account_id = ?",
-                (record.account_id,),
-            ).fetchone()
-            intent = connection.execute(
-                "SELECT 1 FROM account_quarantine_intents WHERE account_id = ?",
-                (record.account_id,),
-            ).fetchone()
+        async with self._database.transaction() as connection:
+            row = await connection.fetchrow(
+                "SELECT * FROM account_quarantines WHERE account_id = $1 FOR UPDATE",
+                record.account_id,
+            )
+            intent = await connection.fetchrow(
+                "SELECT 1 FROM account_quarantine_intents WHERE account_id = $1",
+                record.account_id,
+            )
             if row is not None and intent is not None:
                 raise ServiceError(
                     "QUARANTINE_DATA_INVALID",
@@ -593,50 +395,43 @@ class SqliteRepository:
                     "The account has a pending quarantine transition",
                 )
             if row is not None:
-                connection.execute("COMMIT")
                 return self._quarantine_from_row(row)
             count = int(
-                connection.execute(
+                await connection.fetchval(
                     "SELECT (SELECT COUNT(*) FROM account_quarantines) + "
                     "(SELECT COUNT(*) FROM account_quarantine_intents)"
-                ).fetchone()[0]
+                )
+                or 0
             )
             if count >= self.MAX_ACCOUNT_QUARANTINES:
                 raise ServiceError(
                     "QUARANTINE_CAPACITY_REACHED",
                     "The account quarantine registry is full",
                 )
-            connection.execute(
+            await connection.execute(
                 "INSERT INTO account_quarantines("
                 "account_id, reason, group_ids_json, threshold_ms, observed_count, "
                 "quarantined_at, last_probe_at, last_probe_latency_ms, "
                 "last_probe_result, recovery_success_streak, updated_at"
-                ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    record.account_id,
-                    record.reason.value,
-                    _json(list(record.group_ids)),
-                    record.threshold_ms,
-                    record.observed_count,
-                    _iso(record.quarantined_at),
-                    _iso(record.last_probe_at) if record.last_probe_at is not None else None,
-                    record.last_probe_latency_ms,
-                    record.last_probe_result.value,
-                    record.recovery_success_streak,
-                    _iso(self._clock()),
-                ),
+                ") VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+                record.account_id,
+                record.reason.value,
+                _json(list(record.group_ids)),
+                record.threshold_ms,
+                record.observed_count,
+                record.quarantined_at,
+                record.last_probe_at if record.last_probe_at is not None else None,
+                record.last_probe_latency_ms,
+                record.last_probe_result.value,
+                record.recovery_success_streak,
+                self._clock(),
             )
-            row = connection.execute(
-                "SELECT * FROM account_quarantines WHERE account_id = ?",
-                (record.account_id,),
-            ).fetchone()
-            connection.execute("COMMIT")
-        except Exception:
-            connection.execute("ROLLBACK")
-            raise
-        finally:
-            connection.close()
-        assert row is not None
+            row = await connection.fetchrow(
+                "SELECT * FROM account_quarantines WHERE account_id = $1",
+                record.account_id,
+            )
+        if row is None:
+            raise RuntimeError("quarantine row disappeared after insert")
         return self._quarantine_from_row(row)
 
     async def acquire_account_control_lease(
@@ -645,85 +440,42 @@ class SqliteRepository:
         *,
         lease_seconds: int,
     ) -> bool:
-        return await asyncio.to_thread(
-            self._acquire_account_control_lease_sync,
-            owner,
-            lease_seconds,
-        )
-
-    def _acquire_account_control_lease_sync(
-        self,
-        owner: str,
-        lease_seconds: int,
-    ) -> bool:
         now = self._clock().astimezone(UTC)
-        now_text = _iso(now)
-        expires = _iso(now + timedelta(seconds=lease_seconds))
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                "SELECT owner, expires_at FROM account_control_lease WHERE singleton = 1"
-            ).fetchone()
-            if row is not None and row["owner"] != owner and row["expires_at"] > now_text:
-                connection.execute("COMMIT")
-                return False
-            connection.execute(
-                "INSERT INTO account_control_lease(singleton, owner, expires_at) "
-                "VALUES(1, ?, ?) ON CONFLICT(singleton) DO UPDATE SET "
-                "owner = excluded.owner, expires_at = excluded.expires_at",
-                (owner, expires),
+        expires = now + timedelta(seconds=lease_seconds)
+        async with self._database.transaction() as connection:
+            row = await connection.fetchrow(
+                "SELECT owner, expires_at FROM account_control_lease WHERE singleton = 1 FOR UPDATE"
             )
-            connection.execute("COMMIT")
-            return True
-        except Exception:
-            connection.execute("ROLLBACK")
-            raise
-        finally:
-            connection.close()
+            if row is not None and row["owner"] != owner and row["expires_at"] > now:
+                return False
+            await connection.execute(
+                "INSERT INTO account_control_lease(singleton, owner, expires_at) "
+                "VALUES(1, $1, $2) ON CONFLICT(singleton) DO UPDATE SET "
+                "owner = excluded.owner, expires_at = excluded.expires_at",
+                owner,
+                expires,
+            )
+        return True
 
     async def release_account_control_lease(self, owner: str) -> None:
-        await asyncio.to_thread(self._release_account_control_lease_sync, owner)
-
-    def _release_account_control_lease_sync(self, owner: str) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                "DELETE FROM account_control_lease WHERE singleton = 1 AND owner = ?",
-                (owner,),
+        async with self._database.acquire() as connection:
+            await connection.execute(
+                "DELETE FROM account_control_lease WHERE singleton = 1 AND owner = $1",
+                owner,
             )
 
     async def get_account_quarantine(
         self,
         account_id: str,
     ) -> AccountQuarantineRecord | None:
-        return await asyncio.to_thread(self._get_account_quarantine_sync, account_id)
-
-    def _get_account_quarantine_sync(
-        self,
-        account_id: str,
-    ) -> AccountQuarantineRecord | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM account_quarantines WHERE account_id = ?",
-                (account_id,),
-            ).fetchone()
+        async with self._database.acquire() as connection:
+            row = await connection.fetchrow(
+                "SELECT * FROM account_quarantines WHERE account_id = $1",
+                account_id,
+            )
         return self._quarantine_from_row(row) if row is not None else None
 
     async def list_account_quarantines(
-        self,
-        *,
-        limit: int = 20,
-        cursor: str | None = None,
-        reason: AccountQuarantineReason | None = None,
-    ) -> AccountQuarantinePage:
-        return await asyncio.to_thread(
-            self._list_account_quarantines_sync,
-            limit,
-            cursor,
-            reason,
-        )
-
-    def _list_account_quarantines_sync(
         self,
         limit: int,
         cursor: str | None,
@@ -740,9 +492,7 @@ class SqliteRepository:
             conditions.append("reason = ?")
             parameters.append(reason.value)
         cursor_kind = (
-            f"account-quarantine:{reason.value}"
-            if reason is not None
-            else "account-quarantine:*"
+            f"account-quarantine:{reason.value}" if reason is not None else "account-quarantine:*"
         )
         if cursor:
             kind, account_id = self._decode_cursor(cursor)
@@ -752,12 +502,11 @@ class SqliteRepository:
             parameters.append(account_id)
         where = "WHERE " + " AND ".join(conditions) if conditions else ""
         parameters.append(limit + 1)
-        with self._connect() as connection:
-            rows = connection.execute(
-                f"SELECT * FROM account_quarantines {where} "
-                "ORDER BY account_id ASC LIMIT ?",
+        async with self._database.acquire() as connection:
+            rows = await connection.fetch(
+                f"SELECT * FROM account_quarantines {where} ORDER BY account_id ASC LIMIT $1",
                 parameters,
-            ).fetchall()
+            )
         selected = rows[:limit]
         next_cursor = None
         if len(rows) > limit and selected:
@@ -772,16 +521,6 @@ class SqliteRepository:
 
     async def list_account_quarantines_for_probe(
         self,
-        *,
-        limit: int = 5,
-    ) -> list[AccountQuarantineRecord]:
-        return await asyncio.to_thread(
-            self._list_account_quarantines_for_probe_sync,
-            limit,
-        )
-
-    def _list_account_quarantines_for_probe_sync(
-        self,
         limit: int,
     ) -> list[AccountQuarantineRecord]:
         if not 1 <= limit <= 5:
@@ -789,39 +528,28 @@ class SqliteRepository:
                 "INVALID_PAGE_SIZE",
                 "Account quarantine probe limit must be between 1 and 5",
             )
-        with self._connect() as connection:
-            rows = connection.execute(
+        async with self._database.acquire() as connection:
+            rows = await connection.fetch(
                 "SELECT * FROM account_quarantines "
                 "ORDER BY CASE WHEN last_probe_at IS NULL THEN 0 ELSE 1 END, "
-                "last_probe_at ASC, quarantined_at ASC, account_id ASC LIMIT ?",
-                (limit,),
-            ).fetchall()
+                "last_probe_at ASC, quarantined_at ASC, account_id ASC LIMIT $1",
+                limit,
+            )
         return [self._quarantine_from_row(row) for row in rows]
 
     async def upsert_account_quarantine_intent(
         self,
         intent: AccountQuarantineIntent,
     ) -> AccountQuarantineIntent:
-        return await asyncio.to_thread(
-            self._upsert_account_quarantine_intent_sync,
-            intent,
-        )
-
-    def _upsert_account_quarantine_intent_sync(
-        self,
-        intent: AccountQuarantineIntent,
-    ) -> AccountQuarantineIntent:
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            existing = connection.execute(
-                "SELECT * FROM account_quarantine_intents WHERE account_id = ?",
-                (intent.account_id,),
-            ).fetchone()
-            marker = connection.execute(
-                "SELECT 1 FROM account_quarantines WHERE account_id = ?",
-                (intent.account_id,),
-            ).fetchone()
+        async with self._database.transaction() as connection:
+            existing = await connection.fetchrow(
+                "SELECT * FROM account_quarantine_intents WHERE account_id = $1 FOR UPDATE",
+                intent.account_id,
+            )
+            marker = await connection.fetchrow(
+                "SELECT 1 FROM account_quarantines WHERE account_id = $1",
+                intent.account_id,
+            )
             if existing is not None and marker is not None:
                 raise ServiceError(
                     "QUARANTINE_DATA_INVALID",
@@ -834,56 +562,40 @@ class SqliteRepository:
                 )
             if existing is None:
                 registry_count = int(
-                    connection.execute(
+                    await connection.fetchval(
                         "SELECT (SELECT COUNT(*) FROM account_quarantines) + "
                         "(SELECT COUNT(*) FROM account_quarantine_intents)"
-                    ).fetchone()[0]
+                    )
+                    or 0
                 )
                 if registry_count >= self.MAX_ACCOUNT_QUARANTINES:
                     raise ServiceError(
                         "QUARANTINE_CAPACITY_REACHED",
                         "The account quarantine registry is full",
                     )
-                connection.execute(
+                await connection.execute(
                     "INSERT INTO account_quarantine_intents("
                     "account_id, reason, group_ids_json, threshold_ms, observed_count, "
                     "previous_status, previous_schedulable, created_at"
-                    ") VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        intent.account_id,
-                        intent.reason.value,
-                        _json(list(intent.group_ids)),
-                        intent.threshold_ms,
-                        intent.observed_count,
-                        intent.previous_status,
-                        int(intent.previous_schedulable),
-                        _iso(intent.created_at),
-                    ),
+                    ") VALUES($1, $2, $3, $4, $5, $6, $7, $8)",
+                    intent.account_id,
+                    intent.reason.value,
+                    _json(list(intent.group_ids)),
+                    intent.threshold_ms,
+                    intent.observed_count,
+                    intent.previous_status,
+                    intent.previous_schedulable,
+                    intent.created_at,
                 )
-                existing = connection.execute(
-                    "SELECT * FROM account_quarantine_intents WHERE account_id = ?",
-                    (intent.account_id,),
-                ).fetchone()
-            connection.execute("COMMIT")
-        except Exception:
-            connection.execute("ROLLBACK")
-            raise
-        finally:
-            connection.close()
-        assert existing is not None
+                existing = await connection.fetchrow(
+                    "SELECT * FROM account_quarantine_intents WHERE account_id = $1",
+                    intent.account_id,
+                )
+        if existing is None:
+            raise RuntimeError("quarantine intent disappeared after insert")
         return self._quarantine_intent_from_row(existing)
 
     async def list_account_quarantine_intents(
-        self,
-        *,
-        limit: int = 5,
-    ) -> list[AccountQuarantineIntent]:
-        return await asyncio.to_thread(
-            self._list_account_quarantine_intents_sync,
-            limit,
-        )
-
-    def _list_account_quarantine_intents_sync(
         self,
         limit: int,
     ) -> list[AccountQuarantineIntent]:
@@ -892,149 +604,97 @@ class SqliteRepository:
                 "INVALID_PAGE_SIZE",
                 "Account quarantine intent limit is outside the safe range",
             )
-        with self._connect() as connection:
-            rows = connection.execute(
-                "SELECT * FROM account_quarantine_intents "
-                "ORDER BY created_at, account_id LIMIT ?",
-                (limit,),
-            ).fetchall()
+        async with self._database.acquire() as connection:
+            rows = await connection.fetch(
+                "SELECT * FROM account_quarantine_intents ORDER BY created_at, account_id LIMIT $1",
+                limit,
+            )
         return [self._quarantine_intent_from_row(row) for row in rows]
 
     async def promote_account_quarantine_intent(
         self,
         account_id: str,
     ) -> AccountQuarantineRecord | None:
-        return await asyncio.to_thread(
-            self._promote_account_quarantine_intent_sync,
-            account_id,
-        )
-
-    def _promote_account_quarantine_intent_sync(
-        self,
-        account_id: str,
-    ) -> AccountQuarantineRecord | None:
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            intent = connection.execute(
-                "SELECT * FROM account_quarantine_intents WHERE account_id = ?",
-                (account_id,),
-            ).fetchone()
+        async with self._database.transaction() as connection:
+            intent = await connection.fetchrow(
+                "SELECT * FROM account_quarantine_intents WHERE account_id = $1 FOR UPDATE",
+                account_id,
+            )
             if intent is None:
-                connection.execute("COMMIT")
                 return None
-            connection.execute(
-                "INSERT OR IGNORE INTO account_quarantines("
+            await connection.execute(
+                "INSERT INTO account_quarantines("
                 "account_id, reason, group_ids_json, threshold_ms, observed_count, "
                 "quarantined_at, last_probe_at, last_probe_latency_ms, "
                 "last_probe_result, updated_at"
-                ") VALUES(?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)",
-                (
-                    intent["account_id"],
-                    intent["reason"],
-                    intent["group_ids_json"],
-                    intent["threshold_ms"],
-                    intent["observed_count"],
-                    intent["created_at"],
-                    QuarantineProbeResult.NEVER.value,
-                    _iso(self._clock()),
-                ),
+                ") VALUES($1, $2, $3, $4, $5, $6, NULL, NULL, $7, $8) "
+                "ON CONFLICT(account_id) DO NOTHING",
+                intent["account_id"],
+                intent["reason"],
+                intent["group_ids_json"],
+                intent["threshold_ms"],
+                intent["observed_count"],
+                intent["created_at"],
+                QuarantineProbeResult.NEVER.value,
+                self._clock(),
             )
-            connection.execute(
-                "DELETE FROM account_quarantine_intents WHERE account_id = ?",
-                (account_id,),
+            await connection.execute(
+                "DELETE FROM account_quarantine_intents WHERE account_id = $1",
+                account_id,
             )
-            marker = connection.execute(
-                "SELECT * FROM account_quarantines WHERE account_id = ?",
-                (account_id,),
-            ).fetchone()
-            connection.execute("COMMIT")
-        except Exception:
-            connection.execute("ROLLBACK")
-            raise
-        finally:
-            connection.close()
-        assert marker is not None
+            marker = await connection.fetchrow(
+                "SELECT * FROM account_quarantines WHERE account_id = $1",
+                account_id,
+            )
+        if marker is None:
+            raise RuntimeError("promoted quarantine row disappeared")
         return self._quarantine_from_row(marker)
 
     async def remove_account_quarantine_intent(self, account_id: str) -> bool:
-        return await asyncio.to_thread(
-            self._remove_account_quarantine_intent_sync,
-            account_id,
-        )
-
-    def _remove_account_quarantine_intent_sync(self, account_id: str) -> bool:
-        with self._connect() as connection:
-            removed = connection.execute(
-                "DELETE FROM account_quarantine_intents WHERE account_id = ?",
-                (account_id,),
+        async with self._database.acquire() as connection:
+            removed = await connection.execute(
+                "DELETE FROM account_quarantine_intents WHERE account_id = $1",
+                account_id,
             )
         return removed.rowcount == 1
 
     async def account_quarantine_intent_count(self) -> int:
-        return await asyncio.to_thread(self._account_quarantine_intent_count_sync)
-
-    def _account_quarantine_intent_count_sync(self) -> int:
-        with self._connect() as connection:
-            row = connection.execute(
+        async with self._database.acquire() as connection:
+            row = await connection.fetchrow(
                 "SELECT COUNT(*) AS count FROM account_quarantine_intents"
-            ).fetchone()
+            )
         return int(row["count"] if row is not None else 0)
 
     async def begin_account_quarantine_restore(
         self,
         account_id: str,
     ) -> AccountQuarantineRestoreIntent:
-        return await asyncio.to_thread(
-            self._begin_account_quarantine_restore_sync,
-            account_id,
-        )
-
-    def _begin_account_quarantine_restore_sync(
-        self,
-        account_id: str,
-    ) -> AccountQuarantineRestoreIntent:
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            marker = connection.execute(
-                "SELECT 1 FROM account_quarantines WHERE account_id = ?",
-                (account_id,),
-            ).fetchone()
+        async with self._database.transaction() as connection:
+            marker = await connection.fetchrow(
+                "SELECT 1 FROM account_quarantines WHERE account_id = $1 FOR UPDATE",
+                account_id,
+            )
             if marker is None:
                 raise ServiceError(
                     "QUARANTINE_NOT_FOUND",
                     "The account quarantine does not exist",
                 )
-            connection.execute(
-                "INSERT OR IGNORE INTO account_quarantine_restore_intents("
-                "account_id, created_at) VALUES(?, ?)",
-                (account_id, _iso(self._clock())),
+            await connection.execute(
+                "INSERT INTO account_quarantine_restore_intents("
+                "account_id, created_at) VALUES($1, $2) "
+                "ON CONFLICT(account_id) DO NOTHING",
+                account_id,
+                self._clock(),
             )
-            row = connection.execute(
-                "SELECT * FROM account_quarantine_restore_intents WHERE account_id = ?",
-                (account_id,),
-            ).fetchone()
-            connection.execute("COMMIT")
-        except Exception:
-            connection.execute("ROLLBACK")
-            raise
-        finally:
-            connection.close()
-        assert row is not None
+            row = await connection.fetchrow(
+                "SELECT * FROM account_quarantine_restore_intents WHERE account_id = $1",
+                account_id,
+            )
+        if row is None:
+            raise RuntimeError("restore intent disappeared after insert")
         return self._quarantine_restore_intent_from_row(row)
 
     async def list_account_quarantine_restore_intents(
-        self,
-        *,
-        limit: int = 5,
-    ) -> list[AccountQuarantineRestoreIntent]:
-        return await asyncio.to_thread(
-            self._list_account_quarantine_restore_intents_sync,
-            limit,
-        )
-
-    def _list_account_quarantine_restore_intents_sync(
         self,
         limit: int,
     ) -> list[AccountQuarantineRestoreIntent]:
@@ -1043,78 +703,49 @@ class SqliteRepository:
                 "INVALID_PAGE_SIZE",
                 "Account quarantine restore intent limit is outside the safe range",
             )
-        with self._connect() as connection:
-            rows = connection.execute(
+        async with self._database.acquire() as connection:
+            rows = await connection.fetch(
                 "SELECT * FROM account_quarantine_restore_intents "
-                "ORDER BY created_at, account_id LIMIT ?",
-                (limit,),
-            ).fetchall()
+                "ORDER BY created_at, account_id LIMIT $1",
+                limit,
+            )
         return [self._quarantine_restore_intent_from_row(row) for row in rows]
 
     async def complete_account_quarantine_restore(
         self,
         account_id: str,
     ) -> AccountQuarantineRecord | None:
-        return await asyncio.to_thread(
-            self._complete_account_quarantine_restore_sync,
-            account_id,
-        )
-
-    def _complete_account_quarantine_restore_sync(
-        self,
-        account_id: str,
-    ) -> AccountQuarantineRecord | None:
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            intent = connection.execute(
-                "SELECT 1 FROM account_quarantine_restore_intents WHERE account_id = ?",
-                (account_id,),
-            ).fetchone()
-            marker = connection.execute(
-                "SELECT * FROM account_quarantines WHERE account_id = ?",
-                (account_id,),
-            ).fetchone()
+        async with self._database.transaction() as connection:
+            intent = await connection.fetchrow(
+                "SELECT 1 FROM account_quarantine_restore_intents WHERE account_id = $1",
+                account_id,
+            )
+            marker = await connection.fetchrow(
+                "SELECT * FROM account_quarantines WHERE account_id = $1 FOR UPDATE",
+                account_id,
+            )
             if intent is None or marker is None:
-                connection.execute("COMMIT")
                 return None
             parsed = self._quarantine_from_row(marker)
-            connection.execute(
-                "DELETE FROM account_quarantines WHERE account_id = ?",
-                (account_id,),
+            await connection.execute(
+                "DELETE FROM account_quarantines WHERE account_id = $1",
+                account_id,
             )
-            connection.execute("COMMIT")
-        except Exception:
-            connection.execute("ROLLBACK")
-            raise
-        finally:
-            connection.close()
         return parsed
 
     async def cancel_account_quarantine_restore(self, account_id: str) -> bool:
-        return await asyncio.to_thread(
-            self._cancel_account_quarantine_restore_sync,
-            account_id,
-        )
-
-    def _cancel_account_quarantine_restore_sync(self, account_id: str) -> bool:
-        with self._connect() as connection:
-            removed = connection.execute(
-                "DELETE FROM account_quarantine_restore_intents WHERE account_id = ?",
-                (account_id,),
+        async with self._database.acquire() as connection:
+            removed = await connection.execute(
+                "DELETE FROM account_quarantine_restore_intents WHERE account_id = $1",
+                account_id,
             )
         return removed.rowcount == 1
 
     async def account_quarantine_restore_intent_count(self) -> int:
-        return await asyncio.to_thread(
-            self._account_quarantine_restore_intent_count_sync
-        )
-
-    def _account_quarantine_restore_intent_count_sync(self) -> int:
-        with self._connect() as connection:
-            row = connection.execute(
+        async with self._database.acquire() as connection:
+            row = await connection.fetchrow(
                 "SELECT COUNT(*) AS count FROM account_quarantine_restore_intents"
-            ).fetchone()
+            )
         return int(row["count"] if row is not None else 0)
 
     async def update_account_quarantine_probe(
@@ -1131,29 +762,12 @@ class SqliteRepository:
             raise ValueError("probed_at must be timezone-aware")
         if latency_ms is not None and latency_ms < 0:
             raise ValueError("latency_ms must be non-negative")
-        return await asyncio.to_thread(
-            self._update_account_quarantine_probe_sync,
-            account_id,
-            probed_at,
-            latency_ms,
-            result,
-        )
-
-    def _update_account_quarantine_probe_sync(
-        self,
-        account_id: str,
-        probed_at: datetime,
-        latency_ms: int | None,
-        result: QuarantineProbeResult,
-    ) -> AccountQuarantineRecord:
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            existing = connection.execute(
+        async with self._database.transaction() as connection:
+            existing = await connection.fetchrow(
                 "SELECT reason, threshold_ms, last_probe_at, recovery_success_streak "
-                "FROM account_quarantines WHERE account_id = ?",
-                (account_id,),
-            ).fetchone()
+                "FROM account_quarantines WHERE account_id = $1 FOR UPDATE",
+                account_id,
+            )
             if existing is None:
                 raise ServiceError(
                     "QUARANTINE_NOT_FOUND",
@@ -1174,95 +788,66 @@ class SqliteRepository:
                     raise ValueError("a second passing probe must restore the account")
             elif result is QuarantineProbeResult.SLOW and latency_ms is None:
                 raise ValueError("a slow probe requires measured latency")
-            updated = connection.execute(
-                "UPDATE account_quarantines SET last_probe_at = ?, "
-                "last_probe_latency_ms = ?, last_probe_result = ?, "
-                "recovery_success_streak = ?, updated_at = ? "
-                "WHERE account_id = ?",
-                (
-                    _iso(effective_probed_at),
-                    latency_ms,
-                    result.value,
-                    success_streak,
-                    _iso(self._clock()),
-                    account_id,
-                ),
+            updated = await connection.execute(
+                "UPDATE account_quarantines SET last_probe_at = $1, "
+                "last_probe_latency_ms = $2, last_probe_result = $3, "
+                "recovery_success_streak = $4, updated_at = $5 "
+                "WHERE account_id = $6",
+                effective_probed_at,
+                latency_ms,
+                result.value,
+                success_streak,
+                self._clock(),
+                account_id,
             )
-            if updated.rowcount != 1:
+            if _rowcount(updated) != 1:
                 raise ServiceError(
                     "QUARANTINE_NOT_FOUND",
                     "The account quarantine does not exist",
                 )
-            row = connection.execute(
-                "SELECT * FROM account_quarantines WHERE account_id = ?",
-                (account_id,),
-            ).fetchone()
-            connection.execute("COMMIT")
-        except Exception:
-            connection.execute("ROLLBACK")
-            raise
-        finally:
-            connection.close()
-        assert row is not None
+            row = await connection.fetchrow(
+                "SELECT * FROM account_quarantines WHERE account_id = $1",
+                account_id,
+            )
+        if row is None:
+            raise RuntimeError("quarantine row disappeared after probe update")
         return self._quarantine_from_row(row)
 
     async def remove_verified_account_quarantine(self, account_id: str) -> bool:
-        return await asyncio.to_thread(
-            self._remove_verified_account_quarantine_sync,
-            account_id,
-        )
-
-    def _remove_verified_account_quarantine_sync(self, account_id: str) -> bool:
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            removed = connection.execute(
-                "DELETE FROM account_quarantines WHERE account_id = ?",
-                (account_id,),
+        async with self._database.transaction() as connection:
+            removed = await connection.execute(
+                "DELETE FROM account_quarantines WHERE account_id = $1",
+                account_id,
             )
-            connection.execute("COMMIT")
-        except Exception:
-            connection.execute("ROLLBACK")
-            raise
-        finally:
-            connection.close()
-        return removed.rowcount == 1
+        return _rowcount(removed) == 1
 
     async def account_quarantine_count(
         self,
-        reason: AccountQuarantineReason | None = None,
-    ) -> int:
-        return await asyncio.to_thread(self._account_quarantine_count_sync, reason)
-
-    def _account_quarantine_count_sync(
-        self,
         reason: AccountQuarantineReason | None,
     ) -> int:
-        with self._connect() as connection:
+        async with self._database.acquire() as connection:
             if reason is None:
-                row = connection.execute(
-                    "SELECT COUNT(*) AS count FROM account_quarantines"
-                ).fetchone()
+                row = await connection.fetchrow("SELECT COUNT(*) AS count FROM account_quarantines")
             else:
-                row = connection.execute(
-                    "SELECT COUNT(*) AS count FROM account_quarantines WHERE reason = ?",
-                    (reason.value,),
-                ).fetchone()
+                row = await connection.fetchrow(
+                    "SELECT COUNT(*) AS count FROM account_quarantines WHERE reason = $1",
+                    reason.value,
+                )
         return int(row["count"] if row is not None else 0)
 
     async def bind_actor(self, actor_key: str, user_id: str, masked_email: str) -> AccountBinding:
-        return await asyncio.to_thread(self._bind_actor_sync, actor_key, user_id, masked_email)
-
-    def _bind_actor_sync(self, actor_key: str, user_id: str, masked_email: str) -> AccountBinding:
-        now = _iso(self._clock())
+        now = self._clock()
         try:
-            with self._connect() as connection:
-                connection.execute(
+            async with self._database.acquire() as connection:
+                await connection.execute(
                     "INSERT INTO account_bindings(actor_key, user_id, masked_email, bound_at) "
-                    "VALUES(?, ?, ?, ?)",
-                    (actor_key, user_id, masked_email, now),
+                    "VALUES($1, $2, $3, $4)",
+                    actor_key,
+                    user_id,
+                    masked_email,
+                    now,
                 )
-        except sqlite3.IntegrityError as exc:
+        except asyncpg.UniqueViolationError as exc:
             raise ServiceError(
                 "BINDING_CONFLICT", "The actor or Sub2API account is already bound"
             ) from exc
@@ -1274,13 +859,10 @@ class SqliteRepository:
         )
 
     async def get_binding(self, actor_key: str) -> AccountBinding | None:
-        return await asyncio.to_thread(self._get_binding_sync, actor_key)
-
-    def _get_binding_sync(self, actor_key: str) -> AccountBinding | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM account_bindings WHERE actor_key = ?", (actor_key,)
-            ).fetchone()
+        async with self._database.acquire() as connection:
+            row = await connection.fetchrow(
+                "SELECT * FROM account_bindings WHERE actor_key = $1", actor_key
+            )
         if row is None:
             return None
         bound_at = _datetime(row["bound_at"])
@@ -1293,11 +875,8 @@ class SqliteRepository:
         )
 
     async def unbind_actor(self, actor_key: str) -> None:
-        await asyncio.to_thread(self._unbind_actor_sync, actor_key)
-
-    def _unbind_actor_sync(self, actor_key: str) -> None:
-        with self._connect() as connection:
-            connection.execute("DELETE FROM account_bindings WHERE actor_key = ?", (actor_key,))
+        async with self._database.acquire() as connection:
+            await connection.execute("DELETE FROM account_bindings WHERE actor_key = $1", actor_key)
 
     async def claim_actor_nonce(
         self,
@@ -1306,65 +885,37 @@ class SqliteRepository:
         *,
         claimed_at: datetime | None = None,
     ) -> bool:
-        return await asyncio.to_thread(
-            self._claim_actor_nonce_sync, nonce, expires_at, claimed_at
-        )
-
-    def _claim_actor_nonce_sync(
-        self,
-        nonce: str,
-        expires_at: datetime,
-        claimed_at: datetime | None,
-    ) -> bool:
-        now = _iso(claimed_at or self._clock())
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            connection.execute("DELETE FROM actor_nonces WHERE expires_at <= ?", (now,))
+        now = claimed_at or self._clock()
+        async with self._database.transaction() as connection:
+            await connection.execute("DELETE FROM actor_nonces WHERE expires_at <= $1", now)
             try:
-                connection.execute(
-                    "INSERT INTO actor_nonces(nonce, expires_at) VALUES(?, ?)",
-                    (nonce, _iso(expires_at)),
+                await connection.execute(
+                    "INSERT INTO actor_nonces(nonce, expires_at) VALUES($1, $2)",
+                    nonce,
+                    expires_at,
                 )
-            except sqlite3.IntegrityError:
-                connection.execute("COMMIT")
+            except asyncpg.UniqueViolationError:
+                # A replay of the same nonce: the transaction rolls back and
+                # the caller treats it as already claimed.
                 return False
-            connection.execute("COMMIT")
-            return True
-        except Exception:
-            connection.execute("ROLLBACK")
-            raise
-        finally:
-            connection.close()
+        return True
 
     async def set_snapshot(self, key: str, payload: dict[str, Any]) -> None:
-        await asyncio.to_thread(self._set_snapshot_sync, key, payload)
-
-    def _set_snapshot_sync(self, key: str, payload: dict[str, Any]) -> None:
-        with self._connect() as connection:
-            connection.execute(
+        async with self._database.acquire() as connection:
+            await connection.execute(
                 "INSERT INTO probe_snapshots(snapshot_key, payload_json, updated_at) "
-                "VALUES(?, ?, ?) "
+                "VALUES($1, $2, $3) "
                 "ON CONFLICT(snapshot_key) DO UPDATE SET payload_json = excluded.payload_json, "
                 "updated_at = excluded.updated_at",
-                (key, _json(payload), _iso(self._clock())),
+                key,
+                _json(payload),
+                self._clock(),
             )
 
     async def publish_guardian_snapshot(
         self,
         payload: dict[str, Any],
         *,
-        captured_at: datetime,
-    ) -> str:
-        return await asyncio.to_thread(
-            self._publish_guardian_snapshot_sync,
-            payload,
-            captured_at,
-        )
-
-    def _publish_guardian_snapshot_sync(
-        self,
-        payload: dict[str, Any],
         captured_at: datetime,
     ) -> str:
         if captured_at.tzinfo is None:
@@ -1376,24 +927,21 @@ class SqliteRepository:
                 "The Guardian snapshot exceeds the storage limit",
             )
         payload_hash = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
-        captured = _iso(captured_at)
-        snapshot_id = hashlib.sha256(
-            f"1\0{captured}\0{payload_hash}".encode()
-        ).hexdigest()
-        with self._connect() as connection:
-            connection.execute(
-                "INSERT OR IGNORE INTO guardian_input_snapshots"
+        captured = captured_at
+        snapshot_id = hashlib.sha256(f"1\0{captured}\0{payload_hash}".encode()).hexdigest()
+        async with self._database.acquire() as connection:
+            await connection.execute(
+                "INSERT INTO guardian_input_snapshots"
                 "(snapshot_id, schema_version, payload_json, payload_hash, captured_at, "
-                "created_at) VALUES(?, 1, ?, ?, ?, ?)",
-                (
-                    snapshot_id,
-                    serialized,
-                    payload_hash,
-                    captured,
-                    _iso(self._clock()),
-                ),
+                "created_at) VALUES($1, 1, $2, $3, $4, $5) "
+                "ON CONFLICT(snapshot_id) DO NOTHING",
+                snapshot_id,
+                serialized,
+                payload_hash,
+                captured,
+                self._clock(),
             )
-            connection.execute(
+            await connection.execute(
                 "INSERT INTO guardian_metadata(key, value) "
                 "VALUES('shared_sampling_started', 'true') "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
@@ -1401,51 +949,40 @@ class SqliteRepository:
         return snapshot_id
 
     async def get_snapshot(self, key: str) -> dict[str, Any] | None:
-        return await asyncio.to_thread(self._get_snapshot_sync, key)
-
-    def _get_snapshot_sync(self, key: str) -> dict[str, Any] | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT payload_json FROM probe_snapshots WHERE snapshot_key = ?", (key,)
-            ).fetchone()
+        async with self._database.acquire() as connection:
+            row = await connection.fetchrow(
+                "SELECT payload_json FROM probe_snapshots WHERE snapshot_key = $1", key
+            )
         return json.loads(row["payload_json"]) if row is not None else None
 
     async def set_scheduler_value(self, key: str, value: object) -> None:
-        await asyncio.to_thread(self._set_scheduler_value_sync, key, value)
-
-    def _set_scheduler_value_sync(self, key: str, value: object) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                "INSERT INTO scheduler_state(key, value, updated_at) VALUES(?, ?, ?) "
+        async with self._database.acquire() as connection:
+            await connection.execute(
+                "INSERT INTO scheduler_state(key, value, updated_at) VALUES($1, $2, $3) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
                 "updated_at = excluded.updated_at",
-                (key, _json(value), _iso(self._clock())),
+                key,
+                _json(value),
+                self._clock(),
             )
 
     async def get_scheduler_value(self, key: str) -> object | None:
-        return await asyncio.to_thread(self._get_scheduler_value_sync, key)
-
-    def _get_scheduler_value_sync(self, key: str) -> object | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT value FROM scheduler_state WHERE key = ?", (key,)
-            ).fetchone()
+        async with self._database.acquire() as connection:
+            row = await connection.fetchrow("SELECT value FROM scheduler_state WHERE key = $1", key)
         return json.loads(row["value"]) if row is not None else None
 
-    async def audit(
-        self, principal: str, action: str, subject: str | None, outcome: str
-    ) -> None:
-        await asyncio.to_thread(self._audit_sync, principal, action, subject, outcome)
-
-    def _audit_sync(
-        self, principal: str, action: str, subject: str | None, outcome: str
-    ) -> None:
-        with self._connect() as connection:
-            connection.execute(
+    async def audit(self, principal: str, action: str, subject: str | None, outcome: str) -> None:
+        async with self._database.acquire() as connection:
+            await connection.execute(
                 "INSERT INTO audit_events(audit_id, principal, action, subject, outcome, "
                 "created_at) "
-                "VALUES(?, ?, ?, ?, ?, ?)",
-                (str(uuid.uuid4()), principal, action, subject, outcome, _iso(self._clock())),
+                "VALUES($1, $2, $3, $4, $5, $6)",
+                str(uuid.uuid4()),
+                principal,
+                action,
+                subject,
+                outcome,
+                self._clock(),
             )
 
     async def cleanup_retention(
@@ -1460,21 +997,17 @@ class SqliteRepository:
             raise ValueError("retention time must be timezone-aware")
         if not 1 <= batch_size <= 100_000:
             raise ValueError("batch_size must be between 1 and 100000")
-        return await asyncio.to_thread(
-            self._cleanup_retention_sync,
-            reference,
-            batch_size,
-        )
+        return await self._cleanup_retention_async(reference, batch_size)
 
-    def _cleanup_retention_sync(
+    async def _cleanup_retention_async(
         self,
         now: datetime,
         batch_size: int,
     ) -> dict[str, int]:
         cutoffs = {
-            "jobs": _iso(now - timedelta(days=30)),
-            "audits": _iso(now - timedelta(days=365)),
-            "now": _iso(now),
+            "jobs": now - timedelta(days=30),
+            "audits": now - timedelta(days=365),
+            "now": now,
         }
         counts = {
             "expired_nonces": 0,
@@ -1482,62 +1015,55 @@ class SqliteRepository:
             "audit_events": 0,
         }
         remaining = batch_size
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
+        # Postgres has no ``rowid``; ``ctid`` gives the same bounded-batch
+        # delete without needing a secondary index on these columns.
+        async with self._database.transaction() as connection:
 
-            def execute_bounded(key: str, sql: str, params: tuple[object, ...]) -> None:
+            async def execute_bounded(
+                key: str,
+                sql: str,
+                *params: object,
+            ) -> None:
                 nonlocal remaining
                 if remaining <= 0:
                     return
-                cursor = connection.execute(sql, (*params, remaining))
-                changed = max(0, cursor.rowcount)
+                status = await connection.execute(sql, *params, remaining)
+                changed = max(0, _rowcount(status))
                 counts[key] += changed
                 remaining -= changed
 
-            execute_bounded(
+            await execute_bounded(
                 "expired_nonces",
-                "DELETE FROM actor_nonces WHERE rowid IN "
-                "(SELECT rowid FROM actor_nonces WHERE expires_at <= ? "
-                "ORDER BY expires_at LIMIT ?)",
-                (cutoffs["now"],),
+                "DELETE FROM actor_nonces WHERE ctid IN "
+                "(SELECT ctid FROM actor_nonces WHERE expires_at <= $1 "
+                "ORDER BY expires_at LIMIT $2)",
+                cutoffs["now"],
             )
-            execute_bounded(
+            await execute_bounded(
                 "jobs",
-                "DELETE FROM jobs WHERE rowid IN "
-                "(SELECT rowid FROM jobs WHERE status IN (?, ?, ?, ?) "
-                "AND finished_at IS NOT NULL AND finished_at < ? "
-                "ORDER BY finished_at LIMIT ?)",
-                (
-                    JobStatus.SUCCEEDED.value,
-                    JobStatus.FAILED.value,
-                    JobStatus.CANCELLED.value,
-                    JobStatus.INTERRUPTED.value,
-                    cutoffs["jobs"],
-                ),
+                "DELETE FROM jobs WHERE ctid IN "
+                "(SELECT ctid FROM jobs WHERE status IN ($1, $2, $3, $4) "
+                "AND finished_at IS NOT NULL AND finished_at < $5 "
+                "ORDER BY finished_at LIMIT $6)",
+                JobStatus.SUCCEEDED.value,
+                JobStatus.FAILED.value,
+                JobStatus.CANCELLED.value,
+                JobStatus.INTERRUPTED.value,
+                cutoffs["jobs"],
             )
-            execute_bounded(
+            await execute_bounded(
                 "audit_events",
-                "DELETE FROM audit_events WHERE rowid IN "
-                "(SELECT rowid FROM audit_events WHERE created_at < ? "
-                "ORDER BY created_at LIMIT ?)",
-                (cutoffs["audits"],),
+                "DELETE FROM audit_events WHERE ctid IN "
+                "(SELECT ctid FROM audit_events WHERE created_at < $1 "
+                "ORDER BY created_at LIMIT $2)",
+                cutoffs["audits"],
             )
-            connection.execute("COMMIT")
-            connection.execute("PRAGMA wal_checkpoint(PASSIVE)")
-            connection.execute("PRAGMA optimize")
-        except Exception:
-            if connection.in_transaction:
-                connection.execute("ROLLBACK")
-            raise
-        finally:
-            connection.close()
         counts["deleted_total"] = sum(counts.values())
         counts["processed_total"] = batch_size - remaining
         return counts
 
     @staticmethod
-    def _job_from_row(row: sqlite3.Row) -> JobRecord:
+    def _job_from_row(row: Any) -> JobRecord:
         created_at = _datetime(row["created_at"])
         updated_at = _datetime(row["updated_at"])
         assert created_at is not None and updated_at is not None
@@ -1556,10 +1082,8 @@ class SqliteRepository:
             finished_at=_datetime(row["finished_at"]),
         )
 
-
-
     @staticmethod
-    def _quarantine_from_row(row: sqlite3.Row) -> AccountQuarantineRecord:
+    def _quarantine_from_row(row: Any) -> AccountQuarantineRecord:
         try:
             group_ids = json.loads(row["group_ids_json"])
             return AccountQuarantineRecord.model_validate(
@@ -1583,7 +1107,7 @@ class SqliteRepository:
             ) from exc
 
     @staticmethod
-    def _quarantine_intent_from_row(row: sqlite3.Row) -> AccountQuarantineIntent:
+    def _quarantine_intent_from_row(row: Any) -> AccountQuarantineIntent:
         try:
             return AccountQuarantineIntent.model_validate(
                 {
@@ -1605,7 +1129,7 @@ class SqliteRepository:
 
     @staticmethod
     def _quarantine_restore_intent_from_row(
-        row: sqlite3.Row,
+        row: Any,
     ) -> AccountQuarantineRestoreIntent:
         try:
             return AccountQuarantineRestoreIntent.model_validate(

@@ -261,9 +261,7 @@ class GuardianService:
                     else None
                 ),
             },
-            "latest_abnormal_snapshot": (
-                await self.repository.latest_abnormal_account_snapshot()
-            ),
+            "latest_abnormal_snapshot": (await self.repository.latest_abnormal_account_snapshot()),
             "open_episodes": [
                 {
                     "episode_id": item.episode_id,
@@ -495,8 +493,7 @@ class GuardianService:
         channel_id = payload.get("channel_id")
         group_id = payload.get("group_id")
         if trigger is AccountRecoveryRunTrigger.CHANNEL_ERROR and not all(
-            isinstance(value, str) and value
-            for value in (episode_id, channel_id, group_id)
+            isinstance(value, str) and value for value in (episode_id, channel_id, group_id)
         ):
             raise ServiceError(
                 "INVALID_RECOVERY_JOB",
@@ -558,9 +555,7 @@ class GuardianService:
             already_processed_account_ids=frozenset(processed),
         )
         completed_runs.append(bad_state_run)
-        result["account_recovery_runs"] = [
-            item.model_dump(mode="json") for item in completed_runs
-        ]
+        result["account_recovery_runs"] = [item.model_dump(mode="json") for item in completed_runs]
 
     async def _hourly_active_check_due(self, *, interval_seconds: int) -> bool:
         latest = await self.repository.latest_account_recovery_run(
@@ -599,9 +594,7 @@ class GuardianService:
                 "QUARANTINE_SCAN_LIMIT_REACHED",
                 "The quarantine registry exceeds the safe scan limit",
             )
-        intents = await self._primary_repository.list_account_quarantine_intents(
-            limit=10_000
-        )
+        intents = await self._primary_repository.list_account_quarantine_intents(limit=10_000)
         account_ids.update(item.account_id for item in intents)
         return frozenset(account_ids)
 
@@ -720,14 +713,12 @@ class GuardianService:
             self._metrics.guardian_shared_snapshots.labels(status="empty").inc()
         duplicates = int(result.get("duplicate_observations") or 0)
         if duplicates and not replayed:
-            self._metrics.guardian_duplicate_observations.labels(
-                source="SHARED_MONITOR"
-            ).inc(duplicates)
+            self._metrics.guardian_duplicate_observations.labels(source="SHARED_MONITOR").inc(
+                duplicates
+            )
         traffic_processed = int(result.get("traffic_buckets_processed") or 0)
         if traffic_processed and not replayed:
-            self._metrics.guardian_traffic_buckets.labels(status="fused").inc(
-                traffic_processed
-            )
+            self._metrics.guardian_traffic_buckets.labels(status="fused").inc(traffic_processed)
         sampling = await self.repository.sampling_status()
         latest = sampling.get("latest_snapshot_at")
         if latest:
@@ -746,22 +737,18 @@ class GuardianService:
             float(channel.get("confidence") or 0)
             for channel in cast(list[dict[str, Any]], channels.get("items") or [])
         ]
-        self._metrics.guardian_channel_confidence_min.set(
-            min(confidence_values, default=0)
-        )
+        self._metrics.guardian_channel_confidence_min.set(min(confidence_values, default=0))
         self._metrics.guardian_channel_confidence_average.set(
-            sum(confidence_values) / len(confidence_values)
-            if confidence_values
-            else 0
+            sum(confidence_values) / len(confidence_values) if confidence_values else 0
         )
         budget = await self.probe_budget()
         requests = int(budget["request_count"])
         tokens = int(budget["total_tokens"])
         blocked = int(budget["blocked_count"])
         if requests > self._recovery_metric_requests:
-            self._metrics.guardian_recovery_probe_requests.labels(
-                result="completed"
-            ).inc(requests - self._recovery_metric_requests)
+            self._metrics.guardian_recovery_probe_requests.labels(result="completed").inc(
+                requests - self._recovery_metric_requests
+            )
         if blocked > self._recovery_metric_blocked:
             self._metrics.guardian_recovery_probe_requests.labels(result="blocked").inc(
                 blocked - self._recovery_metric_blocked
@@ -786,9 +773,7 @@ class GuardianService:
         if ratio < 0.8:
             return
         exhausted = ratio >= 1
-        event_type = (
-            "RECOVERY_BUDGET_EXHAUSTED" if exhausted else "RECOVERY_BUDGET_WARNING"
-        )
+        event_type = "RECOVERY_BUDGET_EXHAUSTED" if exhausted else "RECOVERY_BUDGET_WARNING"
         existing = await self.repository.list_events(limit=20, event_type=event_type)
         for event in cast(list[dict[str, Any]], existing.get("items") or []):
             created = datetime.fromisoformat(str(event["created_at"]).replace("Z", "+00:00"))

@@ -130,8 +130,7 @@ def calculate_health_score_v2(
     long_buckets = [
         bucket
         for bucket in buckets
-        if (now - bucket.bucket_at).total_seconds()
-        <= scoring_policy.long_window_minutes * 60
+        if (now - bucket.bucket_at).total_seconds() <= scoring_policy.long_window_minutes * 60
     ]
     if not long_buckets:
         return GuardianScoreV2(
@@ -147,8 +146,7 @@ def calculate_health_score_v2(
     short_buckets = [
         bucket
         for bucket in long_buckets
-        if (now - bucket.bucket_at).total_seconds()
-        <= scoring_policy.short_window_minutes * 60
+        if (now - bucket.bucket_at).total_seconds() <= scoring_policy.short_window_minutes * 60
     ]
     long_score = _time_weighted_score(
         long_buckets,
@@ -164,9 +162,8 @@ def calculate_health_score_v2(
         if short_buckets
         else long_score
     )
-    health_score = (
-        short_score * scoring_policy.short_ratio
-        + long_score * (1 - scoring_policy.short_ratio)
+    health_score = short_score * scoring_policy.short_ratio + long_score * (
+        1 - scoring_policy.short_ratio
     )
 
     latest_evidence_at = max(bucket_times)

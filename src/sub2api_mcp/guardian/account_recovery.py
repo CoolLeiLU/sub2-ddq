@@ -62,10 +62,7 @@ def _classification(
 ) -> tuple[AccountRecoveryClassification, str]:
     if account.expired:
         return AccountRecoveryClassification.EXCLUDED, "expired"
-    if (
-        account.status is GuardianAccountStatus.ACTIVE
-        and not account.schedulable
-    ):
+    if account.status is GuardianAccountStatus.ACTIVE and not account.schedulable:
         if account.automatic_pause:
             return AccountRecoveryClassification.UPSTREAM_ERROR, "automatic_pause"
         return AccountRecoveryClassification.MANUAL_PAUSE, "manual_pause"
@@ -112,11 +109,7 @@ def select_account_recovery_candidates(
     channel_scope = trigger is AccountRecoveryRunTrigger.CHANNEL_ERROR or (
         trigger is AccountRecoveryRunTrigger.MANUAL and group_id is not None
     )
-    scoped = [
-        item
-        for item in observations
-        if not channel_scope or group_id in item.group_ids
-    ]
+    scoped = [item for item in observations if not channel_scope or group_id in item.group_ids]
     scoped.sort(key=lambda item: int(item.account_id))
     decisions: list[GuardianAccountRecoveryDecision] = []
     for account in scoped:
@@ -126,9 +119,7 @@ def select_account_recovery_candidates(
         )
         account_groups = frozenset(account.group_ids)
         monitored_memberships = account_groups & monitored_group_ids
-        shared_with_unmonitored_group = bool(
-            account_groups - monitored_group_ids
-        )
+        shared_with_unmonitored_group = bool(account_groups - monitored_group_ids)
         writeback_allowed = (
             bool(monitored_memberships)
             and (channel_scope or not shared_with_unmonitored_group)
@@ -155,15 +146,12 @@ def select_account_recovery_candidates(
             # BAD_ACCOUNT_STATE/CHANNEL_ERROR paths below, where the test is
             # useful even though the account-level write must be withheld.
             selected = (
-                (
-                    classification is AccountRecoveryClassification.AVAILABLE
-                    or (
-                        classification is AccountRecoveryClassification.UPSTREAM_ERROR
-                        and account.automatic_pause
-                    )
+                classification is AccountRecoveryClassification.AVAILABLE
+                or (
+                    classification is AccountRecoveryClassification.UPSTREAM_ERROR
+                    and account.automatic_pause
                 )
-                and writeback_allowed
-            )
+            ) and writeback_allowed
             if selected:
                 reason = (
                     "hourly_auto_pause"
@@ -173,9 +161,7 @@ def select_account_recovery_candidates(
         elif channel_scope:
             selected = True
             reason = (
-                "channel_error_shared_scope"
-                if shared_with_unmonitored_group
-                else "channel_error"
+                "channel_error_shared_scope" if shared_with_unmonitored_group else "channel_error"
             )
         else:
             selected = classification in {
@@ -203,14 +189,10 @@ def select_account_recovery_candidates(
     if channel_scope and len(decisions) > policy.max_accounts_per_episode:
         global_block_reason = "account_group_too_large"
         decisions = [
-            item.model_copy(
-                update={"selected": False, "reason": global_block_reason}
-            )
+            item.model_copy(update={"selected": False, "reason": global_block_reason})
             for item in decisions
         ]
-    selected_account_ids = tuple(
-        item.account.account_id for item in decisions if item.selected
-    )
+    selected_account_ids = tuple(item.account.account_id for item in decisions if item.selected)
     return GuardianAccountRecoverySelection(
         trigger=trigger,
         decisions=tuple(decisions),
@@ -365,18 +347,14 @@ class AccountRecoveryExecutor:
                 group_id=group_id,
                 quarantined_account_ids=quarantined_account_ids,
                 already_processed_account_ids=(
-                    already_processed_account_ids
-                    | stored_account_ids
-                    | recently_tested_account_ids
+                    already_processed_account_ids | stored_account_ids | recently_tested_account_ids
                 ),
             )
             counts = {
                 "selected": len(selection.selected_account_ids) + len(stored),
                 "tested": sum(item.tested for item in stored),
                 "enabled": sum(item.result is AccountRecoveryResult.ENABLED for item in stored),
-                "disabled": sum(
-                    item.result is AccountRecoveryResult.DISABLED for item in stored
-                ),
+                "disabled": sum(item.result is AccountRecoveryResult.DISABLED for item in stored),
                 "indeterminate": sum(
                     item.result is AccountRecoveryResult.INDETERMINATE for item in stored
                 ),
@@ -642,17 +620,12 @@ class AccountRecoveryExecutor:
             if len(channel_models) == 1:
                 return next(iter(channel_models))
 
-        candidate_groups = (
-            (group_id,)
-            if group_id is not None
-            else tuple(account.group_ids)
-        )
+        candidate_groups = (group_id,) if group_id is not None else tuple(account.group_ids)
         models = sorted(
             {
                 template.model_id
                 for template in templates
-                if template.group_id is not None
-                and template.group_id in candidate_groups
+                if template.group_id is not None and template.group_id in candidate_groups
             }
         )
         # A shared account can belong to channels with different models.  In

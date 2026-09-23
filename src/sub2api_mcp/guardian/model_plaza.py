@@ -45,13 +45,9 @@ class ModelPlazaOperations(Protocol):
 
     async def guardian_list_channel_monitors(self) -> list[AdminMonitorSummary]: ...
 
-    async def guardian_list_group_api_keys(
-        self, group_id: str
-    ) -> list[AdminGroupApiKey]: ...
+    async def guardian_list_group_api_keys(self, group_id: str) -> list[AdminGroupApiKey]: ...
 
-    async def guardian_fetch_endpoint_models(
-        self, endpoint: str, api_key: str
-    ) -> list[str]: ...
+    async def guardian_fetch_endpoint_models(self, endpoint: str, api_key: str) -> list[str]: ...
 
     async def guardian_update_channel_model_mapping(
         self,
@@ -118,9 +114,7 @@ def channel_model_plan(
             entry["reason"] = "channel_inactive"
         else:
             target_groups = [
-                group_id
-                for group_id in channel.group_ids
-                if group_id in monitored_group_ids
+                group_id for group_id in channel.group_ids if group_id in monitored_group_ids
             ]
             if not target_groups:
                 entry["reason"] = "unmonitored_scope"
@@ -236,9 +230,7 @@ class ModelPlazaRefresher:
                 continue
             try:
                 models |= set(
-                    await self._operations.guardian_fetch_endpoint_models(
-                        monitor.endpoint, matched
-                    )
+                    await self._operations.guardian_fetch_endpoint_models(monitor.endpoint, matched)
                 )
             except Exception:
                 failure = failure or "models_fetch_failed"
@@ -250,34 +242,24 @@ class ModelPlazaRefresher:
         snapshot_id: str,
         monitored_group_ids: frozenset[str],
     ) -> dict[str, Any]:
-        templates = await self._repository.probe_templates_for_snapshot(
-            snapshot_id
-        )
+        templates = await self._repository.probe_templates_for_snapshot(snapshot_id)
         monitor_ids_by_group: dict[str, set[str]] = {}
         for template in templates:
-            if (
-                template.group_id is not None
-                and template.group_id in monitored_group_ids
-            ):
-                monitor_ids_by_group.setdefault(template.group_id, set()).add(
-                    template.channel_id
-                )
+            if template.group_id is not None and template.group_id in monitored_group_ids:
+                monitor_ids_by_group.setdefault(template.group_id, set()).add(template.channel_id)
         monitors = {
             monitor.monitor_id: monitor
             for monitor in await self._operations.guardian_list_channel_monitors()
             if monitor.enabled
         }
-        groups = {
-            group.group_id: group
-            for group in await self._operations.guardian_list_groups()
-        }
+        groups = {group.group_id: group for group in await self._operations.guardian_list_groups()}
         group_models: dict[str, set[str]] = {}
         group_failures: dict[str, str] = {}
         for group_id in sorted(monitored_group_ids, key=int):
             try:
-                api_keys: list[AdminGroupApiKey] | None = (
-                    await self._operations.guardian_list_group_api_keys(group_id)
-                )
+                api_keys: (
+                    list[AdminGroupApiKey] | None
+                ) = await self._operations.guardian_list_group_api_keys(group_id)
             except Exception:
                 api_keys = None
             models, failure = await self._group_models(
@@ -290,9 +272,7 @@ class ModelPlazaRefresher:
             if failure:
                 group_failures[group_id] = failure
         channels = await self._operations.guardian_list_channels()
-        bound_group_ids = {
-            group_id for channel in channels for group_id in channel.group_ids
-        }
+        bound_group_ids = {group_id for channel in channels for group_id in channel.group_ids}
         unbound = sorted(
             monitored_group_ids - bound_group_ids,
             key=int,
@@ -331,12 +311,10 @@ class ModelPlazaRefresher:
                         )
                         entry["channel_id"] = orphan.channel_id
                     else:
-                        entry["channel_id"] = (
-                            await self._operations.guardian_create_channel(
-                                name=meta.name,
-                                group_ids=[group_id],
-                                model_mapping={meta.platform: desired},
-                            )
+                        entry["channel_id"] = await self._operations.guardian_create_channel(
+                            name=meta.name,
+                            group_ids=[group_id],
+                            model_mapping={meta.platform: desired},
                         )
                 except Exception:
                     entry["reason"] = "create_failed"
@@ -344,9 +322,7 @@ class ModelPlazaRefresher:
                     entry.update(
                         {
                             "updated": True,
-                            "reason": (
-                                "rebound" if orphan is not None else "created"
-                            ),
+                            "reason": ("rebound" if orphan is not None else "created"),
                             "name": meta.name,
                             "platform": meta.platform,
                             "models": desired_models,
@@ -365,18 +341,13 @@ class ModelPlazaRefresher:
             )
         return {
             "channels": [
-                {key: value for key, value in entry.items() if key != "desired"}
-                for entry in plan
+                {key: value for key, value in entry.items() if key != "desired"} for entry in plan
             ]
             + created,
             "groups": {
                 group_id: sorted(models)
-                for group_id, models in sorted(
-                    group_models.items(), key=lambda item: int(item[0])
-                )
+                for group_id, models in sorted(group_models.items(), key=lambda item: int(item[0]))
             },
             "group_failures": group_failures,
-            "groups_probed": len(
-                [group_id for group_id, models in group_models.items() if models]
-            ),
+            "groups_probed": len([group_id for group_id, models in group_models.items() if models]),
         }

@@ -142,10 +142,7 @@ class SchedulerService:
                 if isinstance(previous_entries, list) and previous_entries:
                     previous_is_non_empty = True
                     break
-        if (
-            current_is_empty
-            and previous_is_non_empty
-        ):
+        if current_is_empty and previous_is_non_empty:
             self._latest_probe = None
             raise ServiceError(
                 "PROBE_EMPTY_RESULT",
@@ -157,8 +154,7 @@ class SchedulerService:
                 guardian_payload = {
                     **result.guardian_snapshot,
                     "accounts": [
-                        item.model_dump(mode="json")
-                        for item in result.account_observations
+                        item.model_dump(mode="json") for item in result.account_observations
                     ],
                 }
                 await self._repository.publish_guardian_snapshot(
@@ -178,13 +174,9 @@ class SchedulerService:
             await self._repository.set_snapshot("delivered", result.snapshot)
 
         quarantine_count = await self._repository.account_quarantine_count()
-        quarantine_intent_count = (
-            await self._repository.account_quarantine_intent_count()
-        )
+        quarantine_intent_count = await self._repository.account_quarantine_intent_count()
         maintenance_required = (
-            quarantine_count > 0
-            or quarantine_intent_count > 0
-            or self._policy.maintenance_enabled
+            quarantine_count > 0 or quarantine_intent_count > 0 or self._policy.maintenance_enabled
         )
         if maintenance_required:
             await self._repository.create_job_with_capacity(JobType.MAINTENANCE, {}, max_active=1)
@@ -214,6 +206,7 @@ class SchedulerService:
                 retryable=True,
             )
         stop_heartbeat = asyncio.Event()
+
         async def run_operation() -> dict[str, Any]:
             return await action()
 
@@ -277,40 +270,28 @@ class SchedulerService:
         for intent in intents:
             action = await self._adapter.reconcile_quarantine_intent(intent)
             if action == "PROMOTE":
-                marker = await self._repository.promote_account_quarantine_intent(
-                    intent.account_id
-                )
+                marker = await self._repository.promote_account_quarantine_intent(intent.account_id)
                 if marker is not None:
                     self._metrics.account_quarantine_transitions.labels(
                         reason=marker.reason.value,
                         action="reconciled",
                     ).inc()
             elif action == "CLEAR":
-                await self._repository.remove_account_quarantine_intent(
-                    intent.account_id
-                )
+                await self._repository.remove_account_quarantine_intent(intent.account_id)
             elif action != "KEEP":
                 raise ServiceError(
                     "QUARANTINE_RECONCILIATION_INVALID",
                     "The quarantine reconciliation result is invalid",
                 )
-            reconciled_intents.append(
-                {"account_id": intent.account_id, "action": action}
-            )
-        restore_intents = (
-            await self._repository.list_account_quarantine_restore_intents(
-                limit=5
-            )
-        )
+            reconciled_intents.append({"account_id": intent.account_id, "action": action})
+        restore_intents = await self._repository.list_account_quarantine_restore_intents(limit=5)
         reconciled_restores: list[dict[str, str]] = []
         for restore_intent in restore_intents:
             restore_marker = await self._repository.get_account_quarantine(
                 restore_intent.account_id
             )
             if restore_marker is None:
-                await self._repository.cancel_account_quarantine_restore(
-                    restore_intent.account_id
-                )
+                await self._repository.cancel_account_quarantine_restore(restore_intent.account_id)
                 continue
             action = await self._adapter.reconcile_quarantine_restore(restore_marker)
             if action == "RECOVERED":
@@ -323,20 +304,14 @@ class SchedulerService:
                         action="recovered",
                     ).inc()
             elif action == "CANCEL":
-                await self._repository.cancel_account_quarantine_restore(
-                    restore_intent.account_id
-                )
+                await self._repository.cancel_account_quarantine_restore(restore_intent.account_id)
             elif action != "KEEP":
                 raise ServiceError(
                     "QUARANTINE_RECONCILIATION_INVALID",
                     "The quarantine restore reconciliation result is invalid",
                 )
-            reconciled_restores.append(
-                {"account_id": restore_intent.account_id, "action": action}
-            )
-        selected_markers = await self._repository.list_account_quarantines_for_probe(
-            limit=5
-        )
+            reconciled_restores.append({"account_id": restore_intent.account_id, "action": action})
+        selected_markers = await self._repository.list_account_quarantines_for_probe(limit=5)
         excluded_account_ids = await self._quarantined_account_ids()
         probe = self._latest_probe or await self._adapter.probe()
         raw_outcomes = await self._adapter.maintain(
@@ -346,9 +321,7 @@ class SchedulerService:
             after_quarantine=self._record_quarantine_disable_result,
         )
         try:
-            outcomes = MaintenanceOutcomeBatch.model_validate(
-                {"items": raw_outcomes}
-            ).items
+            outcomes = MaintenanceOutcomeBatch.model_validate({"items": raw_outcomes}).items
         except ValidationError as exc:
             raise ServiceError(
                 "MAINTENANCE_RESULT_INVALID",
@@ -365,9 +338,7 @@ class SchedulerService:
                 and outcome.threshold_ms is not None
                 and outcome.observed_count is not None
             )
-            persisted = await self._repository.get_account_quarantine(
-                outcome.account_id
-            )
+            persisted = await self._repository.get_account_quarantine(outcome.account_id)
             if persisted is None:
                 raise ServiceError(
                     "QUARANTINE_MARKER_MISSING",
@@ -416,8 +387,7 @@ class SchedulerService:
         return {
             "adjustments": adjustments,
             "outcomes": [
-                outcome.model_dump(mode="json", exclude_none=True)
-                for outcome in outcomes
+                outcome.model_dump(mode="json", exclude_none=True) for outcome in outcomes
             ],
             "probes": quarantine_probes,
             "reconciled_intents": reconciled_intents,
@@ -434,9 +404,7 @@ class SchedulerService:
         state_uncertain: bool,
     ) -> None:
         if success:
-            marker = await self._repository.complete_account_quarantine_restore(
-                account_id
-            )
+            marker = await self._repository.complete_account_quarantine_restore(account_id)
             if marker is None:
                 raise ServiceError(
                     "QUARANTINE_RESTORE_INTENT_MISSING",
@@ -453,9 +421,7 @@ class SchedulerService:
         self,
         payload: dict[str, object],
     ) -> None:
-        intent = AccountQuarantineIntent.model_validate(
-            {**payload, "created_at": self._clock()}
-        )
+        intent = AccountQuarantineIntent.model_validate({**payload, "created_at": self._clock()})
         await self._repository.upsert_account_quarantine_intent(intent)
 
     async def _record_quarantine_disable_result(
@@ -502,9 +468,7 @@ class SchedulerService:
             )
         intent_ids = {
             intent.account_id
-            for intent in await self._repository.list_account_quarantine_intents(
-                limit=10000
-            )
+            for intent in await self._repository.list_account_quarantine_intents(limit=10000)
         }
         account_ids.update(intent_ids)
         return frozenset(account_ids)
@@ -520,16 +484,12 @@ class SchedulerService:
         while not self._stop.is_set():
             try:
                 queued = await self.queue_cycle()
-                self._metrics.scheduler_runs.labels(
-                    status="queued" if queued else "skipped"
-                ).inc()
+                self._metrics.scheduler_runs.labels(status="queued" if queued else "skipped").inc()
             except Exception:
                 _LOGGER.exception("scheduler_cycle_failed")
                 self._metrics.scheduler_runs.labels(status="error").inc()
             with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(
-                    self._stop.wait(), timeout=self._policy.interval_seconds
-                )
+                await asyncio.wait_for(self._stop.wait(), timeout=self._policy.interval_seconds)
 
     async def stop(self) -> None:
         self._stop.set()

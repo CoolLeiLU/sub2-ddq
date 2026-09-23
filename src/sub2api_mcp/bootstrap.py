@@ -26,4 +26,3 @@ def bootstrap_legacy_core(core_root: Path) -> Path:
     if root_text not in sys.path:
         sys.path.insert(0, root_text)
     return resolved
-

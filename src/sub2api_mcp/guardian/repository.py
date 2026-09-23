@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 from pydantic import ValidationError
 
 from ..db import Database, placeholders
+from ..db import rowcount as _rowcount
 from ..errors import ServiceError
 from .contracts import (
     AccountRecoveryClassification,
@@ -323,23 +324,6 @@ def _dt(value: str | datetime | None) -> datetime | None:
 
 def _json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-
-
-def _rowcount(status: str | None) -> int:
-    """Extract the affected row count from an ``asyncpg`` command status.
-
-    ``asyncpg`` returns strings such as ``"UPDATE 3"`` or ``"DELETE 0"`` where
-    SQLite exposed ``Cursor.rowcount``.  Returning 0 for an unparsable
-    status keeps callers that only log the number safe.
-    """
-
-    if not status:
-        return 0
-    _, _, tail = status.rpartition(" ")
-    try:
-        return int(tail)
-    except ValueError:
-        return 0
 
 
 def _snapshot_id(value: str) -> str:

@@ -88,10 +88,14 @@ class QuarantineProbeAttempt(StrictModel):
     def validate_probe_attempt(self) -> QuarantineProbeAttempt:
         if self.result is QuarantineProbeResult.NEVER:
             raise ValueError("a probe attempt cannot use NEVER")
-        if self.result in {
-            QuarantineProbeResult.PASSING,
-            QuarantineProbeResult.SLOW,
-        } and self.latency_ms is None:
+        if (
+            self.result
+            in {
+                QuarantineProbeResult.PASSING,
+                QuarantineProbeResult.SLOW,
+            }
+            and self.latency_ms is None
+        ):
             raise ValueError("latency probe attempts require measured latency")
         if self.recovered != (self.result is QuarantineProbeResult.RECOVERED):
             raise ValueError("successful probe attempts require verified recovery")
@@ -194,6 +198,7 @@ class AccountQuarantineRestoreIntent(StrictModel):
         if value.tzinfo is None:
             raise ValueError("quarantine restore timestamp must be timezone-aware")
         return value
+
 
 class MaintenanceOutcomeCode(StrEnum):
     QUARANTINED = "QUARANTINED"

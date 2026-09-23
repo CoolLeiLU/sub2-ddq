@@ -21,4 +21,3 @@ class AuthenticationError(ServiceError):
 class AuthorizationError(ServiceError):
     def __init__(self) -> None:
         super().__init__("FORBIDDEN", "The API key lacks the required scope")
-

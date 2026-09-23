@@ -114,9 +114,7 @@ class ActorRequestVerifier:
         try:
             requested_at = datetime.fromtimestamp(int(timestamp), tz=UTC)
         except (OverflowError, TypeError, ValueError) as exc:
-            raise ServiceError(
-                "ACTOR_TIMESTAMP_INVALID", "The actor timestamp is invalid"
-            ) from exc
+            raise ServiceError("ACTOR_TIMESTAMP_INVALID", "The actor timestamp is invalid") from exc
         current = self._clock().astimezone(UTC)
         if abs((current - requested_at).total_seconds()) > self._replay_window_seconds:
             raise ServiceError("ACTOR_TIMESTAMP_INVALID", "The actor timestamp is stale")
@@ -174,4 +172,3 @@ class ActorService:
         if binding is None:
             raise ServiceError("ACCOUNT_NOT_BOUND", "The platform user has no binding")
         return ActorBridgeResponse(text=await self._provider.account_report(binding.user_id))
-

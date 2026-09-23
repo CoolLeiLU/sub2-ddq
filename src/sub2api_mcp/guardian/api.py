@@ -392,9 +392,7 @@ class GuardianAPI:
             )
         try:
             idempotency_key = (
-                self._idempotency_key(request, required=require_idempotency)
-                if mutation
-                else None
+                self._idempotency_key(request, required=require_idempotency) if mutation else None
             )
             with bind_principal(principal, request_id):
                 if mutation and idempotency_key:
