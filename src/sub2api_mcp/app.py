@@ -42,6 +42,7 @@ from .metrics import Metrics
 from .repository import SqliteRepository
 from .scheduler import SchedulerPolicy, SchedulerService
 from .service import ServiceOperations, Sub2APIService
+from .session import SessionCodec
 from .tools import Sub2APIMCPServer
 
 
@@ -88,6 +89,7 @@ class Runtime:
     mcp: Sub2APIMCPServer
     guardian_repository: GuardianRepository
     guardian: GuardianService
+    sessions: SessionCodec | None
     actor_verifier: ActorRequestVerifier | None
     actor_service: ActorService | None
     started: bool = False
@@ -107,6 +109,16 @@ def build_runtime(
     database = Database(settings.database_url)
     repository = SqliteRepository(database)
     guardian_repository = GuardianRepository(database)
+    # Console sign-in is optional: without a password hash the REST API stays
+    # API-key only and the login route reports that it is disabled.
+    sessions: SessionCodec | None = None
+    if settings.console_password_hash is not None and settings.session_secret is not None:
+        sessions = SessionCodec(
+            settings.session_secret.get_secret_value(),
+            password_hash=settings.console_password_hash.get_secret_value(),
+            username=settings.console_username,
+            ttl_seconds=settings.session_ttl_seconds,
+        )
     metrics = Metrics.create()
     authenticator = ApiKeyAuthenticator(settings.access_tokens)
     scheduler_policy = SchedulerPolicy(
@@ -173,6 +185,7 @@ def build_runtime(
         service=service,
         mcp=mcp,
         guardian_repository=guardian_repository,
+        sessions=sessions,
         guardian=guardian,
         actor_verifier=actor_verifier,
         actor_service=actor_service,
@@ -330,6 +343,7 @@ def create_app(runtime: Runtime) -> ASGIApp:
         runtime.guardian,
         runtime.authenticator,
         runtime.repository.audit,
+        runtime.sessions,
     )
     application = Starlette(
         routes=[

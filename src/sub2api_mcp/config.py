@@ -98,10 +98,20 @@ class Settings(BaseSettings):
     actor_bridge_secret: SecretStr | None = None
     actor_replay_window_seconds: int = Field(default=300, ge=30, le=900)
 
+    # Console sign-in.  The password is stored as a scrypt hash so the plaintext
+    # never reaches the config file or the image; generate one with
+    # ``python3 scripts/hash_console_password.py``.
+    console_username: str = Field(default="admin", min_length=1, max_length=64)
+    console_password_hash: SecretStr | None = None
+    session_secret: SecretStr | None = None
+    session_ttl_seconds: int = Field(default=12 * 3600, ge=300, le=30 * 86400)
+
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
     @field_validator(
         "actor_bridge_secret",
+        "console_password_hash",
+        "session_secret",
         mode="before",
     )
     @classmethod
@@ -132,6 +142,15 @@ class Settings(BaseSettings):
         if not database_url.path.strip("/"):
             raise ValueError("database_url must name a database")
         self.database_url = self.database_url.strip()
+
+        if (self.console_password_hash is None) != (self.session_secret is None):
+            raise ValueError(
+                "console_password_hash and session_secret must be set together"
+            )
+        if self.session_secret is not None and (
+            len(self.session_secret.get_secret_value()) < 32
+        ):
+            raise ValueError("session_secret must contain at least 32 characters")
 
         if self.actor_bridge_enabled and (
             self.actor_bridge_secret is None

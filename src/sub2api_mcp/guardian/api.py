@@ -7,6 +7,7 @@ import logging
 import re
 import uuid
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -18,6 +19,7 @@ from starlette.routing import Route
 from ..auth import ApiKeyAuthenticator, Principal, bind_principal
 from ..config import Scope
 from ..errors import ServiceError
+from ..session import COOKIE_NAME, Session, SessionCodec
 from .service import GuardianService
 
 _STATIC_ROOT = Path(__file__).with_name("static")
@@ -30,10 +32,13 @@ class GuardianAPI:
         service: GuardianService,
         authenticator: ApiKeyAuthenticator,
         audit: Callable[[str, str, str | None, str], Awaitable[None]],
+        sessions: SessionCodec | None = None,
     ) -> None:
         self.service = service
         self._authenticator = authenticator
         self._audit = audit
+        self._sessions = sessions
+        self._login_attempts: dict[str, list[float]] = {}
         self._logger = logging.getLogger("sub2api_mcp.guardian.api")
 
     def routes(self) -> list[Route]:
@@ -41,6 +46,9 @@ class GuardianAPI:
             Route("/guardian", self.redirect_ui, methods=["GET"]),
             Route("/guardian/", self.ui, methods=["GET"]),
             Route("/guardian/assets/{name:str}", self.asset, methods=["GET"]),
+            Route("/api/guardian/v1/session", self.session_state, methods=["GET"]),
+            Route("/api/guardian/v1/login", self.login, methods=["POST"]),
+            Route("/api/guardian/v1/logout", self.logout, methods=["POST"]),
             Route("/api/guardian/v1/overview", self.overview, methods=["GET"]),
             Route("/api/guardian/v1/status", self.status, methods=["GET"]),
             Route(
@@ -119,6 +127,105 @@ class GuardianAPI:
         if name not in media_types:
             return JSONResponse({"error": "not_found"}, status_code=404)
         return FileResponse(_STATIC_ROOT / name, media_type=media_types[name])
+
+    async def session_state(self, request: Request) -> Response:
+        """Report whether the caller already holds a valid console session."""
+
+        request_id = self._request_id(request)
+        if self._sessions is None:
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "requestId": request_id,
+                    "data": {"authenticated": False, "login_enabled": False},
+                }
+            )
+        session = self._current_session(request)
+        authenticated = session is not None
+        token_present = (
+            self._authenticator.authenticate(request.scope.get("headers", [])) is not None
+        )
+        return JSONResponse(
+            {
+                "ok": True,
+                "requestId": request_id,
+                "data": {
+                    "authenticated": authenticated or token_present,
+                    "login_enabled": True,
+                    "username": session.username if session is not None else None,
+                    "expires_at": (session.expires_at.isoformat() if session is not None else None),
+                },
+            },
+            headers={"X-Request-ID": request_id, "Cache-Control": "no-store"},
+        )
+
+    async def login(self, request: Request) -> Response:
+        """Exchange the console password for a signed session cookie."""
+
+        request_id = self._request_id(request)
+        if self._sessions is None:
+            return self._error(
+                request_id,
+                ServiceError("LOGIN_DISABLED", "Console sign-in is not configured"),
+                503,
+            )
+        body = await self._body(request)
+        username = body.get("username")
+        password = body.get("password")
+        if not isinstance(username, str) or not isinstance(password, str):
+            return self._error(
+                request_id,
+                ServiceError("VALIDATION_ERROR", "username and password are required"),
+                422,
+            )
+        if len(username) > 128 or len(password) > 512:
+            return self._error(
+                request_id,
+                ServiceError("VALIDATION_ERROR", "credentials are too long"),
+                422,
+            )
+        if not self._throttle_login(request):
+            return self._error(
+                request_id,
+                ServiceError("TOO_MANY_ATTEMPTS", "Too many sign-in attempts"),
+                429,
+            )
+        if not self._sessions.check_credentials(username, password):
+            await self._audit("console", "guardian_login", username[:64], "denied")
+            return self._error(
+                request_id,
+                ServiceError("INVALID_CREDENTIALS", "Invalid username or password"),
+                401,
+            )
+        token, session = self._sessions.issue(self._sessions.username)
+        await self._audit("console", "guardian_login", self._sessions.username, "ok")
+        response = JSONResponse(
+            {
+                "ok": True,
+                "requestId": request_id,
+                "data": {
+                    "authenticated": True,
+                    "username": session.username,
+                    "expires_at": session.expires_at.isoformat(),
+                },
+            },
+            headers={"X-Request-ID": request_id, "Cache-Control": "no-store"},
+        )
+        self._set_session_cookie(
+            response, token, session.expires_at, secure=request.url.scheme == "https"
+        )
+        return response
+
+    async def logout(self, request: Request) -> Response:
+        """Clear the console session cookie."""
+
+        request_id = self._request_id(request)
+        response = JSONResponse(
+            {"ok": True, "requestId": request_id, "data": {"authenticated": False}},
+            headers={"X-Request-ID": request_id, "Cache-Control": "no-store"},
+        )
+        self._clear_session_cookie(response, secure=request.url.scheme == "https")
+        return response
 
     async def overview(self, request: Request) -> Response:
         return await self._execute(request, "sub2api:read", self.service.overview)
@@ -379,6 +486,15 @@ class GuardianAPI:
         request_id = self._request_id(request)
         principal = self._authenticator.authenticate(request.scope.get("headers", []))
         if principal is None:
+            # The console signs in with a cookie instead of an API key.  A
+            # valid session is treated as an admin principal for every route
+            # this API exposes, which is what the operator console needs.
+            session = self._current_session(request)
+            if session is not None:
+                principal = Principal(
+                    session.username, frozenset({"sub2api:read", "sub2api:write", "sub2api:admin"})
+                )
+        if principal is None:
             return self._error(
                 request_id,
                 ServiceError("UNAUTHENTICATED", "A valid API key is required"),
@@ -446,6 +562,65 @@ class GuardianAPI:
                     extra={"requestId": request_id, "action": mutation},
                 )
         return self._error(request_id, error, status_code)
+
+    def _current_session(self, request: Request) -> Session | None:
+        """Return the console session carried by the request cookie, if valid."""
+
+        if self._sessions is None:
+            return None
+        token = request.cookies.get(COOKIE_NAME, "")
+        if not token:
+            return None
+        return self._sessions.verify(token)
+
+    @staticmethod
+    def _set_session_cookie(
+        response: Response,
+        token: str,
+        expires_at: datetime,
+        *,
+        secure: bool,
+    ) -> None:
+        response.set_cookie(
+            COOKIE_NAME,
+            token,
+            max_age=max(0, int((expires_at - datetime.now(UTC)).total_seconds())),
+            # HttpOnly keeps the token away from page scripts; SameSite=Lax
+            # still allows the top-level navigation that loads the console.
+            httponly=True,
+            secure=secure,
+            samesite="lax",
+            path="/",
+        )
+
+    @staticmethod
+    def _clear_session_cookie(response: Response, *, secure: bool) -> None:
+        response.delete_cookie(
+            COOKIE_NAME,
+            httponly=True,
+            secure=secure,
+            samesite="lax",
+            path="/",
+        )
+
+    def _throttle_login(self, request: Request) -> bool:
+        """Allow a small number of sign-in attempts per client per minute.
+
+        The window is short and held in process, which is enough to blunt
+        password guessing without adding a store dependency to the login path.
+        """
+
+        client = request.client.host if request.client is not None else "unknown"
+        now = datetime.now(UTC)
+        window = self._login_attempts.setdefault(client, [])
+        # Drop attempts that have aged out of the window.
+        cutoff = now.timestamp() - 60
+        while window and window[0] < cutoff:
+            window.pop(0)
+        if len(window) >= 10:
+            return False
+        window.append(now.timestamp())
+        return True
 
     @staticmethod
     def _authorized(principal: Principal, scope: Scope) -> bool:
