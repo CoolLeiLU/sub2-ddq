@@ -109,6 +109,9 @@ jobs:
             --exclude=.env \
             --exclude=.venv \
             --exclude=data \
+            --exclude=web/node_modules \
+            --exclude='web/*.tsbuildinfo' \
+            --exclude=__pycache__ \
             -czf "${archive}" .
           checksum=$(sha256sum "${archive}" | awk '{print $1}')
           printf 'archive=%s\n' "${archive}" >> "${GITHUB_OUTPUT}"
