@@ -39,6 +39,11 @@ junit*.xml
 .cache/
 .uv-cache/
 
+# Console build output.  The Ant Design console is compiled from web/ by the
+# Dockerfile and by CI, so the emitted bundle is not committed.
+/src/sub2api_mcp/guardian/static/assets/
+/src/sub2api_mcp/guardian/static/index.html
+
 # Python packaging and generated builds
 build/
 dist/

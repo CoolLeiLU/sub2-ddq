@@ -13,7 +13,13 @@ from typing import Any, cast
 
 from pydantic import ValidationError
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from starlette.responses import (
+    FileResponse,
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+    Response,
+)
 from starlette.routing import Route
 
 from ..auth import ApiKeyAuthenticator, Principal, bind_principal
@@ -24,6 +30,24 @@ from .service import GuardianService
 
 _STATIC_ROOT = Path(__file__).with_name("static")
 _IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+
+_MEDIA_TYPES = {
+    ".js": "text/javascript",
+    ".mjs": "text/javascript",
+    ".css": "text/css",
+    ".json": "application/json",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+    ".ttf": "font/ttf",
+    ".ico": "image/x-icon",
+    ".map": "application/json",
+}
 
 
 class GuardianAPI:
@@ -45,7 +69,7 @@ class GuardianAPI:
         return [
             Route("/guardian", self.redirect_ui, methods=["GET"]),
             Route("/guardian/", self.ui, methods=["GET"]),
-            Route("/guardian/assets/{name:str}", self.asset, methods=["GET"]),
+            Route("/guardian/assets/{path:path}", self.asset, methods=["GET"]),
             Route("/api/guardian/v1/session", self.session_state, methods=["GET"]),
             Route("/api/guardian/v1/login", self.login, methods=["POST"]),
             Route("/api/guardian/v1/logout", self.logout, methods=["POST"]),
@@ -116,17 +140,39 @@ class GuardianAPI:
         return RedirectResponse("/guardian/", status_code=308)
 
     async def ui(self, _: Request) -> Response:
-        return FileResponse(_STATIC_ROOT / "index.html", media_type="text/html")
+        index = _STATIC_ROOT / "index.html"
+        if not index.is_file():
+            # The console is a build artifact; in a source checkout that has not
+            # run ``npm run build`` the page is simply absent.
+            return PlainTextResponse(
+                "The Guardian console has not been built. "
+                "Run `npm run build` in web/, or use the REST API at "
+                "/api/guardian/v1/.",
+                status_code=503,
+            )
+        return FileResponse(index, media_type="text/html")
 
     async def asset(self, request: Request) -> Response:
-        name = request.path_params["name"]
-        media_types = {
-            "app.css": "text/css",
-            "app.js": "text/javascript",
-        }
-        if name not in media_types:
+        """Serve one file from the bundled console build.
+
+        Vite emits a content-hashed tree under ``assets/``, so the path is
+        resolved against the static root and rejected when it escapes.
+        """
+
+        relative = request.path_params["path"]
+        candidate = (_STATIC_ROOT / "assets" / relative).resolve()
+        assets_root = (_STATIC_ROOT / "assets").resolve()
+        if not candidate.is_file() or assets_root not in candidate.parents:
             return JSONResponse({"error": "not_found"}, status_code=404)
-        return FileResponse(_STATIC_ROOT / name, media_type=media_types[name])
+        media_type = _MEDIA_TYPES.get(candidate.suffix.lower())
+        if media_type is None:
+            return JSONResponse({"error": "not_found"}, status_code=404)
+        return FileResponse(
+            candidate,
+            media_type=media_type,
+            # The filenames carry a content hash, so they are safe to cache.
+            headers={"Cache-Control": "public, max-age=31536000, immutable"},
+        )
 
     async def session_state(self, request: Request) -> Response:
         """Report whether the caller already holds a valid console session."""

@@ -5,3 +5,4 @@
 !src/**
 !core/*.py
 !core/assets/**
+!web/**

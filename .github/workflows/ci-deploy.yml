@@ -43,6 +43,31 @@ jobs:
       - name: Audit dependencies
         run: uv run pip-audit
 
+      - name: Set up Node
+        uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install console dependencies
+        working-directory: web
+        run: npm ci --no-audit --no-fund
+
+      - name: Typecheck the console
+        working-directory: web
+        run: npm run typecheck
+
+      - name: Build the console
+        working-directory: web
+        run: npm run build
+
+      - name: Confirm the console build produced assets
+        run: |
+          test -f src/sub2api_mcp/guardian/static/index.html
+          test -d src/sub2api_mcp/guardian/static/assets
+          test -n "$(find src/sub2api_mcp/guardian/static/assets -name '*.js' -print -quit)"
+
       - name: Build local-only image
         run: docker build --tag "bot-mcp-ci:${GITHUB_SHA}" .
 

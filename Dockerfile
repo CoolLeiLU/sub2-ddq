@@ -1,5 +1,17 @@
 ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.11.1@sha256:fc93e9ecd7218e9ec8fba117af89348eef8fd2463c50c13347478769aaedd0ce
 ARG PYTHON_IMAGE=python:3.12.7-slim@sha256:60d9996b6a8a3689d36db740b49f4327be3be09a21122bd02fb8895abb38b50d
+ARG NODE_IMAGE=node:22-alpine
+FROM ${NODE_IMAGE} AS console
+
+# Build the Ant Design console.  The output lands in the Python package's
+# static directory, so the runtime stage only has to copy the source tree.
+WORKDIR /console
+COPY web/package.json web/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY web/ ./
+RUN npm run build
+
+
 FROM ${UV_IMAGE} AS uv
 
 FROM ${PYTHON_IMAGE} AS runtime
@@ -24,6 +36,12 @@ COPY --chown=sub2api:sub2api pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 COPY --chown=sub2api:sub2api src ./src
+# The console build output replaces whatever the source tree shipped, so the
+# image always carries assets that match this revision.  In the console stage
+# the Vite root is /console and it writes to ../src/..., giving /src.
+COPY --from=console --chown=sub2api:sub2api \
+    /src/sub2api_mcp/guardian/static \
+    /opt/sub2api-mcp/src/sub2api_mcp/guardian/static
 COPY --chown=sub2api:sub2api README.md ./README.md
 COPY --chown=sub2api:sub2api core/*.py /opt/sub2api-core/
 COPY --chown=sub2api:sub2api core/assets /opt/sub2api-core/assets
