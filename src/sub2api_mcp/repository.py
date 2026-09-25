@@ -45,8 +45,27 @@ def _datetime(value: str | datetime | None) -> datetime | None:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+def _json_default(value: object) -> str:
+    """Encode the values ``json.dumps`` rejects.
+
+    Rows from ``TIMESTAMPTZ`` columns carry ``datetime`` objects under asyncpg
+    where SQLite handed back text, so anything derived from a row — paging
+    cursors, stored details, audit records — needs this hook.
+    """
+
+    if isinstance(value, datetime):
+        return value.isoformat()
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
 def _json(value: object) -> str:
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+        default=_json_default,
+    )
 
 
 class SqliteRepository:
@@ -179,12 +198,12 @@ class SqliteRepository:
         return self._job_from_row(row) if row is not None else None
 
     @staticmethod
-    def _encode_cursor(created_at: str, job_id: str) -> str:
+    def _encode_cursor(created_at: datetime, job_id: str) -> str:
         raw = _json([created_at, job_id]).encode()
         return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
     @staticmethod
-    def _decode_cursor(cursor: str) -> tuple[str, str]:
+    def _decode_cursor(cursor: str) -> tuple[datetime, str]:
         if len(cursor) > 4096:
             raise ServiceError("INVALID_CURSOR", "The cursor is invalid")
         try:
@@ -195,7 +214,12 @@ class SqliteRepository:
             value = cast(list[object], raw_value)
             if len(value) != 2 or not all(isinstance(item, str) for item in value):
                 raise ValueError
-            return cast(str, value[0]), cast(str, value[1])
+            # ``_encode_cursor`` writes the timestamp with ``isoformat``; return
+            # a datetime so asyncpg can bind it against the TIMESTAMPTZ column.
+            created_at = datetime.fromisoformat(value[0].replace("Z", "+00:00"))
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=UTC)
+            return created_at, cast(str, value[1])
         except (ValueError, UnicodeError, json.JSONDecodeError) as exc:
             raise ServiceError("INVALID_CURSOR", "The job cursor is invalid") from exc
 
