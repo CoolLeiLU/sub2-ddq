@@ -326,8 +326,27 @@ def _dt(value: str | datetime | None) -> datetime | None:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+def _json_default(value: object) -> str:
+    """Encode the values ``json.dumps`` rejects.
+
+    Rows read from ``TIMESTAMPTZ`` columns arrive as ``datetime`` objects under
+    asyncpg where SQLite handed back text, so every caller that serialises a
+    row-derived value needs this hook rather than the default encoder.
+    """
+
+    if isinstance(value, datetime):
+        return value.isoformat()
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
 def _json(value: object) -> str:
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+        default=_json_default,
+    )
 
 
 def _snapshot_id(value: str) -> str:
@@ -338,12 +357,12 @@ def _snapshot_id(value: str) -> str:
     return normalized
 
 
-def _cursor(created_at: str, item_id: str) -> str:
+def _cursor(created_at: datetime, item_id: str) -> str:
     encoded = base64.urlsafe_b64encode(_json([created_at, item_id]).encode()).decode()
     return encoded.rstrip("=")
 
 
-def _decode_cursor(value: str) -> tuple[str, str]:
+def _decode_cursor(value: str) -> tuple[datetime, str]:
     try:
         padded = value + "=" * (-len(value) % 4)
         raw_decoded: object = json.loads(base64.urlsafe_b64decode(padded).decode())
@@ -355,7 +374,14 @@ def _decode_cursor(value: str) -> tuple[str, str]:
         first, second = decoded
         if not isinstance(first, str) or not isinstance(second, str):
             raise ValueError
-        return first, second
+        # ``_cursor`` writes the timestamp with ``isoformat``; hand it back as a
+        # datetime so asyncpg can bind it against a TIMESTAMPTZ column.  Passing
+        # the raw string leaves the parameter type indeterminate and the query
+        # fails with IndeterminateDatatypeError.
+        created_at = _dt(first)
+        if created_at is None:
+            raise ValueError
+        return created_at, second
     except (ValueError, UnicodeError, json.JSONDecodeError) as exc:
         raise ServiceError("INVALID_CURSOR", "The Guardian cursor is invalid") from exc
 
@@ -1912,10 +1938,17 @@ class GuardianRepository:
             conditions.append(f"severity = ${len(params)}")
         if cursor:
             created_at, event_id = _decode_cursor(cursor)
-            params.extend((created_at, created_at, event_id))
+            # Two placeholders, two parameters: the timestamp is referenced
+            # twice in the predicate, so it is bound once under a single index.
+            # The previous version appended it twice and then referenced
+            # len-2 and len, leaving the middle parameter unbound, which made
+            # asyncpg fail with IndeterminateDatatypeError on every paged read.
+            params.extend((created_at, event_id))
+            timestamp_index = len(params) - 1
+            event_index = len(params)
             conditions.append(
-                f"(created_at < ${len(params) - 2} "
-                f"OR (created_at = ${len(params) - 2} AND event_id < ${len(params)}))"
+                f"(created_at < ${timestamp_index} "
+                f"OR (created_at = ${timestamp_index} AND event_id < ${event_index}))"
             )
         where = "WHERE " + " AND ".join(conditions) if conditions else ""
         params.append(limit + 1)

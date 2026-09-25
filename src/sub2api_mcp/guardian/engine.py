@@ -202,9 +202,14 @@ class GuardianEngine:
             account_observations_ingested = 0
             if claimed_snapshot is not None:
                 snapshot_id = cast(str, claimed_snapshot["snapshot_id"])
-                captured_at = datetime.fromisoformat(
-                    cast(str, claimed_snapshot["captured_at"]).replace("Z", "+00:00")
-                )
+                # ``guardian_input_snapshots.captured_at`` is TIMESTAMPTZ and
+                # asyncpg hands back a datetime, so no parsing is needed here.
+                # The previous code asserted a str and called .replace("Z", ...)
+                # on it, which reached datetime.replace and raised TypeError on
+                # every cycle that claimed a snapshot.
+                captured_at = cast(datetime, claimed_snapshot["captured_at"])
+                if captured_at.tzinfo is None:
+                    captured_at = captured_at.replace(tzinfo=UTC)
                 account_observations_ingested = await self.repository.upsert_account_observations(
                     snapshot_id=snapshot_id,
                     observed_at=captured_at,
