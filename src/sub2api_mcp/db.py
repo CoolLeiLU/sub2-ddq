@@ -11,11 +11,11 @@ Placeholder style is rewritten from ``?`` to ``$1..$n`` in SQL strings by
 from __future__ import annotations
 
 import re
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, Sequence
 from contextlib import asynccontextmanager
 from typing import Any, Protocol
 
-import asyncpg
+import asyncpg  # pyright: ignore[reportMissingTypeStubs]
 
 __all__ = [
     "Database",
@@ -128,10 +128,10 @@ class Database:
         self._dsn = dsn
         self._min_size = min_size
         self._max_size = max_size
-        self._pool: asyncpg.Pool | None = None
+        self._pool: Any = None
 
     @property
-    def pool(self) -> asyncpg.Pool:
+    def pool(self) -> Any:
         if self._pool is None:
             raise RuntimeError("the database pool has not been initialized")
         return self._pool
@@ -139,7 +139,7 @@ class Database:
     async def connect(self) -> None:
         if self._pool is not None:
             return
-        self._pool = await asyncpg.create_pool(
+        self._pool = await asyncpg.create_pool(  # pyright: ignore[reportUnknownMemberType]
             dsn=self._dsn,
             min_size=self._min_size,
             max_size=self._max_size,
@@ -153,7 +153,7 @@ class Database:
         self._pool = None
 
     @asynccontextmanager
-    async def acquire(self) -> AsyncIterator[TransactionProtocol]:
+    async def acquire(self) -> AsyncGenerator[Any]:
         """A pooled connection with no surrounding transaction.
 
         Used for single statements, which Postgres wraps in an implicit
@@ -164,7 +164,7 @@ class Database:
             yield connection
 
     @asynccontextmanager
-    async def transaction(self) -> AsyncIterator[TransactionProtocol]:
+    async def transaction(self) -> AsyncGenerator[Any]:
         """A pooled connection inside an explicit transaction.
 
         This replaces SQLite's ``BEGIN IMMEDIATE``.  Isolation is the Postgres

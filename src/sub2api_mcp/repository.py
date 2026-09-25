@@ -37,12 +37,6 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-def _iso(value: datetime) -> str:
-    if value.tzinfo is None:
-        raise ValueError("timestamps must be timezone-aware")
-    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
-
-
 def _datetime(value: str | datetime | None) -> datetime | None:
     if value is None:
         return None
@@ -477,9 +471,9 @@ class SqliteRepository:
 
     async def list_account_quarantines(
         self,
-        limit: int,
-        cursor: str | None,
-        reason: AccountQuarantineReason | None,
+        limit: int = 100,
+        cursor: str | None = None,
+        reason: AccountQuarantineReason | None = None,
     ) -> AccountQuarantinePage:
         if not 1 <= limit <= 100:
             raise ServiceError(
@@ -823,7 +817,7 @@ class SqliteRepository:
 
     async def account_quarantine_count(
         self,
-        reason: AccountQuarantineReason | None,
+        reason: AccountQuarantineReason | None = None,
     ) -> int:
         async with self._database.acquire() as connection:
             if reason is None:

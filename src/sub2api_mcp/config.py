@@ -144,12 +144,8 @@ class Settings(BaseSettings):
         self.database_url = self.database_url.strip()
 
         if (self.console_password_hash is None) != (self.session_secret is None):
-            raise ValueError(
-                "console_password_hash and session_secret must be set together"
-            )
-        if self.session_secret is not None and (
-            len(self.session_secret.get_secret_value()) < 32
-        ):
+            raise ValueError("console_password_hash and session_secret must be set together")
+        if self.session_secret is not None and (len(self.session_secret.get_secret_value()) < 32):
             raise ValueError("session_secret must contain at least 32 characters")
 
         if self.actor_bridge_enabled and (

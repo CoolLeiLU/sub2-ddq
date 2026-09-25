@@ -23,6 +23,7 @@ import json
 import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import cast
 
 __all__ = [
     "COOKIE_NAME",
@@ -173,10 +174,13 @@ class SessionCodec:
         if not hmac.compare_digest(supplied, expected):
             return None
         try:
-            data = json.loads(payload)
+            decoded: object = json.loads(payload)
         except (UnicodeError, json.JSONDecodeError):
             return None
-        if not isinstance(data, dict) or data.get("v") != _VERSION:
+        if not isinstance(decoded, dict):
+            return None
+        data = cast(dict[str, object], decoded)
+        if data.get("v") != _VERSION:
             return None
         username = data.get("u")
         issued = data.get("iat")

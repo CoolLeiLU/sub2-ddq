@@ -7,7 +7,6 @@ import logging
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Any, cast
 from zoneinfo import ZoneInfo
 
@@ -39,12 +38,10 @@ _RETENTION_BATCH_SIZE = 20_000
 _RETENTION_TOTAL_KEYS = frozenset({"processed_total", "deleted_total"})
 
 
-def _sqlite_database_bytes(path: Path) -> int:
-    return sum(
-        candidate.stat().st_size
-        for candidate in (path, Path(f"{path}-wal"), Path(f"{path}-shm"))
-        if candidate.exists()
-    )
+async def _database_bytes(repository: GuardianRepository) -> int:
+    """Ask PostgreSQL for the size of the database Guardian writes to."""
+
+    return await repository.database_size_bytes()
 
 
 def _merge_dict(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
@@ -677,7 +674,7 @@ class GuardianService:
                                 store=store,
                                 operation=operation,
                             ).inc(count)
-            database_bytes = _sqlite_database_bytes(self.repository.path)
+            database_bytes = await _database_bytes(self.repository)
             if self._metrics is not None:
                 self._metrics.retention_runs.labels(status="success").inc()
                 self._metrics.database_size_bytes.set(database_bytes)
@@ -766,7 +763,7 @@ class GuardianService:
         if not policy.recovery_budget.enabled:
             return
         now = datetime.now(ZoneInfo("Asia/Shanghai"))
-        usage = await self.repository.recovery_probe_budget_summary(now.date())
+        usage = await self.repository.recovery_probe_budget_summary(now.date().isoformat())
         request_ratio = float(usage["request_count"]) / policy.recovery_budget.daily_requests
         token_ratio = float(usage["total_tokens"]) / policy.recovery_budget.daily_tokens
         ratio = max(request_ratio, token_ratio)
@@ -964,7 +961,7 @@ class GuardianService:
     async def probe_budget(self) -> dict[str, Any]:
         now = datetime.now(ZoneInfo("Asia/Shanghai"))
         policy = await self.repository.get_policy()
-        usage = await self.repository.recovery_probe_budget_summary(now.date())
+        usage = await self.repository.recovery_probe_budget_summary(now.date().isoformat())
         return {
             **usage,
             "daily_request_limit": policy.recovery_budget.daily_requests,

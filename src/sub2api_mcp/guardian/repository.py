@@ -1341,11 +1341,11 @@ class GuardianRepository:
 
     async def list_channels(
         self,
-        limit: int,
-        cursor: str | None,
-        group_id: str | None,
-        health: str | None,
-        query: str | None,
+        limit: int = 100,
+        cursor: str | None = None,
+        group_id: str | None = None,
+        health: str | None = None,
+        query: str | None = None,
     ) -> dict[str, Any]:
         if not 1 <= limit <= 200:
             raise ServiceError("INVALID_PAGE_SIZE", "Page size must be between 1 and 200")
@@ -1467,14 +1467,14 @@ class GuardianRepository:
                 )
 
     async def list_groups(self) -> list[dict[str, Any]]:
-        overrides = self._list_group_overrides_sync()
+        overrides = await self.list_group_overrides()
         async with self._database.acquire() as connection:
             group_rows = await connection.fetch(
                 "SELECT * FROM guardian_groups WHERE removed_at IS NULL ORDER BY group_id"
             )
             channel_rows = await connection.fetch(
                 "SELECT COALESCE(group_id, 'ungrouped') AS group_id, "
-                "MAX(json_extract(details_json, '$.group_name')) AS group_name, "
+                "MAX(details_json::jsonb ->> 'group_name') AS group_name, "
                 "COUNT(*) AS channel_count, "
                 "SUM(CASE WHEN desired_schedulable THEN 1 ELSE 0 END) AS available_count, "
                 "AVG(score) AS score, AVG(latency_ms) AS latency_ms "
@@ -1796,9 +1796,9 @@ class GuardianRepository:
         self,
         run_id: str,
         status: str,
-        result: dict[str, Any] | None,
-        error_code: str | None,
-        error_message: str | None,
+        result: dict[str, Any] | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
     ) -> dict[str, Any]:
         if status not in {"SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"}:
             raise ValueError("invalid Guardian run terminal status")
@@ -1854,9 +1854,12 @@ class GuardianRepository:
         event_type: str,
         severity: str,
         message: str,
-        channel_id: str | None,
-        group_id: str | None,
-        details: dict[str, Any],
+        # Service-wide events carry no channel or group, and callers pass these
+        # by keyword only when they have one.
+        channel_id: str | None = None,
+        group_id: str | None = None,
+        *,
+        details: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         event_id = str(uuid.uuid4())
         now = self._clock()
@@ -1871,7 +1874,7 @@ class GuardianRepository:
                 channel_id,
                 group_id,
                 message[:1000],
-                _json(details),
+                _json(details or {}),
                 now,
             )
             await connection.execute(
@@ -1892,10 +1895,10 @@ class GuardianRepository:
 
     async def list_events(
         self,
-        limit: int,
-        cursor: str | None,
-        event_type: str | None,
-        severity: str | None,
+        limit: int = 100,
+        cursor: str | None = None,
+        event_type: str | None = None,
+        severity: str | None = None,
     ) -> dict[str, Any]:
         if not 1 <= limit <= 200:
             raise ServiceError("INVALID_PAGE_SIZE", "Page size must be between 1 and 200")
@@ -2082,6 +2085,13 @@ class GuardianRepository:
             occurred_at,
             reason,
         )
+
+    async def database_size_bytes(self) -> int:
+        """Return the on-disk size PostgreSQL reports for this database."""
+
+        async with self._database.acquire() as connection:
+            value = await connection.fetchval("SELECT pg_database_size(current_database())")
+        return int(value or 0)
 
     async def recovery_probe_budget_summary(self, budget_date: str) -> dict[str, Any]:
         async with self._database.acquire() as connection:
