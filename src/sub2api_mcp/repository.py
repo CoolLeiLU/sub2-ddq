@@ -211,21 +211,27 @@ class SqliteRepository:
         parameters: list[object] = []
         conditions: list[str] = []
         if job_type is not None:
-            conditions.append("job_type = ?")
             parameters.append(job_type.value)
+            conditions.append(f"job_type = ${len(parameters)}")
         if status is not None:
-            conditions.append("status = ?")
             parameters.append(status.value)
+            conditions.append(f"status = ${len(parameters)}")
         if cursor:
             created_at, job_id = self._decode_cursor(cursor)
-            conditions.append("(created_at < ? OR (created_at = ? AND job_id < ?))")
-            parameters.extend((created_at, created_at, job_id))
+            parameters.extend((created_at, job_id))
+            timestamp_index = len(parameters) - 1
+            job_index = len(parameters)
+            conditions.append(
+                f"(created_at < ${timestamp_index} "
+                f"OR (created_at = ${timestamp_index} AND job_id < ${job_index}))"
+            )
         where = "WHERE " + " AND ".join(conditions) if conditions else ""
         parameters.append(limit + 1)
         async with self._database.acquire() as connection:
             rows = await connection.fetch(
-                f"SELECT * FROM jobs {where} ORDER BY created_at DESC, job_id DESC LIMIT $1",
-                parameters,
+                f"SELECT * FROM jobs {where} ORDER BY created_at DESC, job_id DESC "
+                f"LIMIT ${len(parameters)}",
+                *parameters,
             )
         has_more = len(rows) > limit
         selected = rows[:limit]
@@ -483,8 +489,8 @@ class SqliteRepository:
         conditions: list[str] = []
         parameters: list[object] = []
         if reason is not None:
-            conditions.append("reason = ?")
             parameters.append(reason.value)
+            conditions.append(f"reason = ${len(parameters)}")
         cursor_kind = (
             f"account-quarantine:{reason.value}" if reason is not None else "account-quarantine:*"
         )
@@ -492,14 +498,15 @@ class SqliteRepository:
             kind, account_id = self._decode_cursor(cursor)
             if kind != cursor_kind:
                 raise ServiceError("INVALID_CURSOR", "The quarantine cursor is invalid")
-            conditions.append("account_id > ?")
             parameters.append(account_id)
+            conditions.append(f"account_id > ${len(parameters)}")
         where = "WHERE " + " AND ".join(conditions) if conditions else ""
         parameters.append(limit + 1)
         async with self._database.acquire() as connection:
             rows = await connection.fetch(
-                f"SELECT * FROM account_quarantines {where} ORDER BY account_id ASC LIMIT $1",
-                parameters,
+                f"SELECT * FROM account_quarantines {where} ORDER BY account_id ASC "
+                f"LIMIT ${len(parameters)}",
+                *parameters,
             )
         selected = rows[:limit]
         next_cursor = None
