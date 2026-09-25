@@ -97,6 +97,11 @@ class GuardianAPI:
 
     def routes(self) -> list[Route]:
         return [
+            # The console is the only human-facing surface, so the bare host
+            # lands on it.  Listed before the MCP catch-all mount in app.py,
+            # which would otherwise hand `/` to the API-key layer.  `/mcp` is
+            # the MCP endpoint and is unaffected.
+            Route("/", self.redirect_root, methods=["GET", "HEAD"]),
             Route("/guardian", self.redirect_ui, methods=["GET"]),
             Route("/guardian/", self.ui, methods=["GET"]),
             Route("/guardian/assets/{path:path}", self.asset, methods=["GET"]),
@@ -165,6 +170,11 @@ class GuardianAPI:
             ),
             Route("/api/guardian/v1/events", self.events, methods=["GET"]),
         ]
+
+    async def redirect_root(self, _: Request) -> Response:
+        """Send the bare host to the console."""
+
+        return RedirectResponse("/guardian/", status_code=307)
 
     async def redirect_ui(self, _: Request) -> Response:
         return RedirectResponse("/guardian/", status_code=308)
