@@ -2500,9 +2500,13 @@ class GuardianRepository:
 
     @staticmethod
     def _channel(row: Any) -> dict[str, Any]:
+        # Only the JOIN in `get_channel`/`list_channels` selects the override,
+        # so the column is absent on the rows `upsert_channel` reads back.
+        # asyncpg raises KeyError for a missing field where sqlite3.Row raised
+        # IndexError, which is what this used to catch.
         try:
             override_json = row["channel_override_json"]
-        except IndexError:
+        except (KeyError, IndexError):
             override_json = None
         return {
             "channel_id": row["channel_id"],
