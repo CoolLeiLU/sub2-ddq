@@ -1547,7 +1547,7 @@ class GuardianRepository:
                 self._clock(),
                 channel_id,
             )
-            if updated.rowcount != 1:
+            if _rowcount(updated) != 1:
                 raise ServiceError("CHANNEL_NOT_FOUND", "The Guardian channel does not exist")
             row = await connection.fetchrow(
                 "SELECT * FROM guardian_channels WHERE channel_id = $1", channel_id
@@ -1816,7 +1816,7 @@ class GuardianRepository:
                 now,
                 run_id,
             )
-            if updated.rowcount != 1:
+            if _rowcount(updated) != 1:
                 raise ServiceError("INVALID_RUN_STATE", "The Guardian run is not running")
             row = await connection.fetchrow("SELECT * FROM guardian_runs WHERE run_id = $1", run_id)
         assert row is not None
@@ -1843,7 +1843,7 @@ class GuardianRepository:
                 self._clock(),
                 run_id,
             )
-            if updated.rowcount != 1:
+            if _rowcount(updated) != 1:
                 raise ServiceError("INVALID_RUN_STATE", "The Guardian run is not running")
             row = await connection.fetchrow("SELECT * FROM guardian_runs WHERE run_id = $1", run_id)
         assert row is not None

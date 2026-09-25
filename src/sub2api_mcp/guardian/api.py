@@ -31,6 +31,36 @@ from .service import GuardianService
 _STATIC_ROOT = Path(__file__).with_name("static")
 _IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
+
+def _json_default(value: object) -> str:
+    """Encode values that the standard json encoder rejects."""
+
+    if isinstance(value, datetime):
+        return value.isoformat()
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+class GuardianJSONResponse(JSONResponse):
+    """JSON response that can serialize the repository row shapes.
+
+    Repository row mappers hand ``datetime`` values straight from asyncpg so
+    the same structures feed both the API and the console.  Stock
+    ``JSONResponse`` uses ``json.dumps`` without a ``default`` hook, so every
+    route returning a timestamped record raises ``TypeError`` as soon as the
+    table it reads has a row.
+    """
+
+    def render(self, content: Any) -> bytes:
+        return json.dumps(
+            content,
+            ensure_ascii=False,
+            allow_nan=False,
+            indent=None,
+            separators=(",", ":"),
+            default=_json_default,
+        ).encode("utf-8")
+
+
 _MEDIA_TYPES = {
     ".js": "text/javascript",
     ".mjs": "text/javascript",
@@ -562,7 +592,7 @@ class GuardianAPI:
                         idempotency_key, mutation, subject
                     )
                     if cached is not None:
-                        return JSONResponse(
+                        return GuardianJSONResponse(
                             {"ok": True, "requestId": request_id, "data": cached},
                             headers={
                                 "X-Request-ID": request_id,
@@ -579,7 +609,7 @@ class GuardianAPI:
                     )
                 if mutation:
                     await self._audit(principal.name, mutation, subject, "success")
-            return JSONResponse(
+            return GuardianJSONResponse(
                 {"ok": True, "requestId": request_id, "data": data},
                 headers={"X-Request-ID": request_id},
             )

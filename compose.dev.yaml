@@ -1,0 +1,65 @@
+# Local development override for `compose.yaml`.
+#
+#   docker compose -f compose.yaml -f compose.dev.yaml up --build
+#
+# The production image is deliberately sealed: read-only root filesystem, a
+# non-root user, baked dependencies and a precompiled console.  This override
+# keeps the hardened Postgres service untouched and re-opens only the app
+# container so source edits are picked up without a rebuild:
+#
+#   * src/ and core/ are bind-mounted over the baked copies, and uvicorn runs
+#     with --reload so a saved Python file rebuilds the application.
+#   * the root filesystem is writable because the reloader writes bytecode and
+#     uvicorn keeps its reloader state under /tmp.
+#   * the console is not built here; run Vite on the host (`cd web && npm run
+#     dev`) and browse http://127.0.0.1:5173/guardian/, which proxies /api and
+#     /guardian to this container's published port.
+#
+# Never use this file for deployment.
+
+services:
+  sub2api-mcp:
+    image: sub2api-scheduler-mcp-dev:${SUB2API_MCP_IMAGE_TAG:-dev}
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+      # Pin the base images by digest so the build uses the copies already in
+      # the local image store instead of resolving them from the registry.
+      # On networks whose resolver answers Docker Hub hostnames incorrectly,
+      # BuildKit's own metadata lookup fails even though `docker pull` works.
+      # Pull them once with `docker pull` before the first build.
+      args:
+        UV_IMAGE: ghcr.io/astral-sh/uv:0.11.1@sha256:fc93e9ecd7218e9ec8fba117af89348eef8fd2463c50c13347478769aaedd0ce
+        PYTHON_IMAGE: python:3.12.7-slim@sha256:60d9996b6a8a3689d36db740b49f4327be3be09a21122bd02fb8895abb38b50d
+        NODE_IMAGE: node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
+    # The base file's ENTRYPOINT is the production `python -m sub2api_mcp`,
+    # which would swallow `command` below as extra argv.  Clear it so the
+    # reload server is what actually runs.
+    entrypoint: []
+    command:
+      - /opt/sub2api-mcp/venv/bin/python
+      - -m
+      - uvicorn
+      - dev_app:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "5310"
+      - --reload
+      - --reload-dir
+      - /opt/sub2api-mcp/src
+      - --reload-dir
+      - /opt/sub2api-core
+      - --reload-dir
+      - /opt/sub2api-dev
+    volumes:
+      - ./src:/opt/sub2api-mcp/src
+      - ./core:/opt/sub2api-core
+      - ./dev:/opt/sub2api-dev:ro
+    environment:
+      PYTHONPATH: /opt/sub2api-dev:/opt/sub2api-mcp/src:/opt/sub2api-core
+    # Bind-mounted sources cannot be trusted to match the locked environment
+    # and the reloader runs a supervisor plus a worker, so the hardened limits
+    # from compose.yaml are relaxed for development only.
+    read_only: false
+    mem_limit: 1g

@@ -341,7 +341,7 @@ class SqliteRepository:
                 job_id,
                 JobStatus.RUNNING.value,
             )
-            if updated.rowcount != 1:
+            if _rowcount(updated) != 1:
                 raise ServiceError("INVALID_JOB_STATE", "The job is not running")
             row = await connection.fetchrow("SELECT * FROM jobs WHERE job_id = $1", job_id)
         assert row is not None
@@ -650,7 +650,7 @@ class SqliteRepository:
                 "DELETE FROM account_quarantine_intents WHERE account_id = $1",
                 account_id,
             )
-        return removed.rowcount == 1
+        return _rowcount(removed) == 1
 
     async def account_quarantine_intent_count(self) -> int:
         async with self._database.acquire() as connection:
@@ -733,7 +733,7 @@ class SqliteRepository:
                 "DELETE FROM account_quarantine_restore_intents WHERE account_id = $1",
                 account_id,
             )
-        return removed.rowcount == 1
+        return _rowcount(removed) == 1
 
     async def account_quarantine_restore_intent_count(self) -> int:
         async with self._database.acquire() as connection:
