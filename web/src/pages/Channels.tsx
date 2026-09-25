@@ -1,18 +1,9 @@
 import { useEffect, useState } from 'react'
 import { Alert, Card, Input, Progress, Space, Table, Tag, Typography } from 'antd'
 
+import StatusTag from '../components/StatusTag'
 import { api, type Channel } from '../api'
-
-const HEALTH_COLORS: Record<string, string> = {
-  HEALTHY: 'green',
-  DEGRADED: 'orange',
-  FUSED: 'red',
-  STALE: 'default',
-  WARMING_UP: 'blue',
-  EXCLUDED: 'default',
-  MANUALLY_PAUSED: 'purple',
-  PENDING: 'default',
-}
+import { healthStyle, palette, upstreamStyle } from '../theme'
 
 /** Channel inventory with health, score and scheduling intent. */
 export default function Channels() {
@@ -62,15 +53,18 @@ export default function Channels() {
         pagination={{ pageSize: 20, showSizeChanger: false }}
         scroll={{ x: 900 }}
         columns={[
-          { title: 'ID', dataIndex: 'channel_id', width: 70 },
+          {
+            title: 'ID',
+            dataIndex: 'channel_id',
+            width: 70,
+            render: (value: string) => <Typography.Text code>{value}</Typography.Text>,
+          },
           { title: '名称', dataIndex: 'name', width: 180 },
           {
             title: '健康',
             dataIndex: 'health',
             width: 130,
-            render: (health: string) => (
-              <Tag color={HEALTH_COLORS[health] ?? 'default'}>{health}</Tag>
-            ),
+            render: (health: string) => <StatusTag style={healthStyle(health)} tooltip={health} />,
           },
           {
             title: '评分',
@@ -80,7 +74,13 @@ export default function Channels() {
               <Progress
                 percent={Math.round(score)}
                 size="small"
-                status={score >= 75 ? 'success' : score >= 50 ? 'normal' : 'exception'}
+                strokeColor={
+                  score >= 75
+                    ? palette.primary
+                    : score >= 50
+                      ? palette.accent
+                      : palette.destructive
+                }
               />
             ),
           },
@@ -88,44 +88,52 @@ export default function Channels() {
             title: '置信度',
             dataIndex: 'confidence',
             width: 90,
-            render: (value: number) => `${Math.round(value * 100)}%`,
+            align: 'right',
+            render: (value: number) => (
+              <span className="data-table">{Math.round(value * 100)}%</span>
+            ),
           },
           {
             title: '延迟',
             dataIndex: 'latency_ms',
             width: 100,
-            render: (value: number | null) => (value === null ? '—' : `${value} ms`),
+            align: 'right',
+            render: (value: number | null) => (
+              <span className="data-table">{value === null ? '—' : `${value} ms`}</span>
+            ),
           },
           {
             title: '上游状态',
             dataIndex: 'upstream_status',
             width: 110,
             render: (status: string) => (
-              <Tag color={status === 'operational' ? 'green' : status === 'error' ? 'red' : 'orange'}>
-                {status}
-              </Tag>
+              <StatusTag style={upstreamStyle(status)} tooltip={status} />
             ),
           },
           {
             title: '调度',
             dataIndex: 'desired_schedulable',
-            width: 90,
+            width: 100,
             render: (desired: boolean, row) =>
               row.manual_control !== 'NONE' ? (
-                <Tag color="purple">{row.manual_control}</Tag>
+                <Tag color="purple" style={{ marginInlineEnd: 0 }}>
+                  {healthStyle('MANUALLY_PAUSED').label}
+                </Tag>
               ) : (
-                <Tag color={desired ? 'green' : 'default'}>{desired ? '可调度' : '已暂停'}</Tag>
+                <Tag color={desired ? 'blue' : 'default'} style={{ marginInlineEnd: 0 }}>
+                  {desired ? '可调度' : '已暂停'}
+                </Tag>
               ),
           },
           {
             title: '数据新鲜度',
             dataIndex: 'freshness_state',
-            width: 110,
+            width: 120,
             render: (state: string) => <Typography.Text type="secondary">{state}</Typography.Text>,
           },
         ]}
       />
-      <Space style={{ marginTop: 12 }}>
+      <Space style={{ marginTop: 'var(--space-lg)' }}>
         <Typography.Text type="secondary">共 {filtered.length} 个渠道</Typography.Text>
       </Space>
     </Card>

@@ -1,0 +1,233 @@
+/*
+ * Guardian console design tokens.
+ *
+ * Values come from design-system/guardian-control/MASTER.md, with the two
+ * page-level overrides applied where they are stricter than the master file:
+ * both overrides reject the generated purple/pink palette and require a
+ * restrained light operations look with no gradients or glass effects.
+ *
+ * The console is served under a CSP of `default-src 'self'; style-src 'self'`,
+ * so no web font is fetched. The stack degrades to locally installed Fira
+ * faces, then to the system Chinese and generic families.
+ */
+
+:root {
+  /* Brand and surface */
+  --color-primary: #1e40af;
+  --color-primary-hover: #1c3a9e;
+  --color-primary-active: #183182;
+  --color-on-primary: #ffffff;
+  --color-secondary: #3b82f6;
+  --color-accent: #d97706;
+  --color-accent-hover: #b45309;
+
+  --color-background: #f8fafc;
+  --color-surface: #ffffff;
+  --color-muted: #e9eef6;
+  --color-foreground: #1e3a8a;
+  --color-text: #0f172a;
+  --color-text-secondary: #475569;
+  --color-text-tertiary: #64748b;
+  --color-border: #dbeafe;
+  --color-border-strong: #c7d7f0;
+  --color-destructive: #dc2626;
+  --color-ring: #1e40af;
+
+  /* Status semantics. The console never relies on color alone: every status is
+   * rendered as a dot or tag plus its text label. */
+  --color-success: #16a34a;
+  --color-success-bg: #f0fdf4;
+  --color-success-border: #bbf7d0;
+  --color-warning: #d97706;
+  --color-warning-bg: #fffbeb;
+  --color-warning-border: #fde68a;
+  --color-danger: #dc2626;
+  --color-danger-bg: #fef2f2;
+  --color-danger-border: #fecaca;
+  --color-info: #3b82f6;
+  --color-info-bg: #eff6ff;
+  --color-info-border: #bfdbfe;
+  --color-neutral: #64748b;
+  --color-neutral-bg: #f1f5f9;
+  --color-neutral-border: #e2e8f0;
+
+  /* Spacing — density 8/10, so steps stay tight. */
+  --space-xs: 2px;
+  --space-sm: 4px;
+  --space-md: 8px;
+  --space-lg: 12px;
+  --space-xl: 16px;
+  --space-2xl: 24px;
+  --space-3xl: 32px;
+
+  /* Elevation */
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.05);
+  --shadow-md: 0 4px 6px rgba(15, 23, 42, 0.1);
+  --shadow-lg: 0 10px 15px rgba(15, 23, 42, 0.1);
+
+  /* Radii */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+
+  --font-sans: "Fira Sans", "Noto Sans SC", "PingFang SC", "Microsoft YaHei",
+    system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "Fira Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo,
+    monospace;
+
+  /* The overrides cap motion at 180–200ms for state changes. */
+  --transition-fast: 180ms ease;
+  --transition-base: 200ms ease;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-background);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+code,
+pre,
+kbd,
+samp,
+.font-mono {
+  font-family: var(--font-mono);
+}
+
+/* Keyboard focus must stay visible and use the primary ring. */
+:focus-visible {
+  outline: 2px solid var(--color-ring);
+  outline-offset: 2px;
+}
+
+/* Long identifiers and JSON payloads must not force the page to scroll. */
+.wrap-anywhere {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.data-table {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Horizontal scrolling belongs to the table wrapper, never the document. */
+.table-scroll {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+/* Sign-in shell.
+ *
+ * The wrapper centres a single card. From 768px up the card becomes two
+ * columns; below that the brand column is dropped so the form keeps the full
+ * width and the 44px controls are not squeezed. */
+.login-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-background);
+  padding: var(--space-2xl);
+}
+
+.login-shell {
+  width: 100%;
+  max-width: 860px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  overflow: hidden;
+}
+
+.login-brand {
+  background: var(--color-primary);
+  color: var(--color-on-primary);
+  padding: var(--space-3xl) var(--space-2xl);
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: var(--space-3xl);
+}
+
+.login-form {
+  padding: var(--space-3xl) var(--space-2xl);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.login-capabilities {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: var(--space-lg);
+}
+
+.login-capabilities li {
+  display: flex;
+  gap: var(--space-lg);
+  align-items: flex-start;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.9);
+  line-height: 1.6;
+}
+
+.login-capability-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  margin-top: 7px;
+}
+
+@media (min-width: 768px) {
+  .login-shell {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 767px) {
+  .login-brand {
+    display: none;
+  }
+
+  .login-page {
+    padding: var(--space-xl);
+  }
+
+  .login-form {
+    padding: var(--space-2xl) var(--space-xl);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

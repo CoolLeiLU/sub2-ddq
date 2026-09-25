@@ -14,7 +14,7 @@
     "resolveJsonModule": true,
     "allowImportingTsExtensions": false,
     "noEmit": true,
-    "types": ["vite/client"]
+    "types": ["vite/client", "node"]
   },
-  "include": ["src"]
+  "include": ["src", "vite.config.ts", "plugin-antd-static-styles.ts"]
 }

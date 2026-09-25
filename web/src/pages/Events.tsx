@@ -1,14 +1,9 @@
 import { useEffect, useState } from 'react'
-import { Alert, Card, Select, Table, Tag, Typography } from 'antd'
+import { Alert, Card, Select, Table } from 'antd'
 
+import StatusTag from '../components/StatusTag'
 import { api, type GuardianEvent } from '../api'
-
-const SEVERITY_COLORS: Record<string, string> = {
-  INFO: 'blue',
-  WARNING: 'orange',
-  ERROR: 'red',
-  CRITICAL: 'red',
-}
+import { severityStyle } from '../theme'
 
 /** Guardian's own event log: state transitions, quarantine, recovery, plaza. */
 export default function Events() {
@@ -41,7 +36,7 @@ export default function Events() {
           onChange={setSeverity}
           options={['INFO', 'WARNING', 'ERROR', 'CRITICAL'].map((value) => ({
             value,
-            label: value,
+            label: severityStyle(value).label,
           }))}
         />
       }
@@ -57,28 +52,52 @@ export default function Events() {
             title: '时间',
             dataIndex: 'created_at',
             width: 180,
-            render: (value: string) => new Date(value).toLocaleString('zh-CN'),
+            render: (value: string) => (
+              <span className="data-table">{new Date(value).toLocaleString('zh-CN')}</span>
+            ),
           },
           {
             title: '级别',
             dataIndex: 'severity',
-            width: 100,
+            width: 110,
             render: (value: string) => (
-              <Tag color={SEVERITY_COLORS[value] ?? 'default'}>{value}</Tag>
+              <StatusTag style={severityStyle(value)} tooltip={value} />
             ),
           },
           { title: '类型', dataIndex: 'event_type', width: 220 },
-          { title: '渠道', dataIndex: 'channel_id', width: 80, render: (v: string | null) => v ?? '—' },
-          { title: '分组', dataIndex: 'group_id', width: 80, render: (v: string | null) => v ?? '—' },
-          { title: '说明', dataIndex: 'message' },
+          {
+            title: '渠道',
+            dataIndex: 'channel_id',
+            width: 80,
+            render: (value: string | null) => <span className="data-table">{value ?? '—'}</span>,
+          },
+          {
+            title: '分组',
+            dataIndex: 'group_id',
+            width: 80,
+            render: (value: string | null) => <span className="data-table">{value ?? '—'}</span>,
+          },
+          {
+            title: '说明',
+            dataIndex: 'message',
+            render: (value: string) => <span className="wrap-anywhere">{value}</span>,
+          },
         ]}
         expandable={{
           expandedRowRender: (event) => (
-            <Typography.Paragraph style={{ margin: 0 }}>
-              <pre style={{ margin: 0, fontSize: 12 }}>
-                {JSON.stringify(event.details, null, 2)}
-              </pre>
-            </Typography.Paragraph>
+            <pre
+              style={{
+                margin: 0,
+                fontSize: 12,
+                background: '#f1f5f9',
+                border: '1px solid #e2e8f0',
+                borderRadius: 'var(--radius-sm)',
+                padding: 'var(--space-lg)',
+                overflowX: 'auto',
+              }}
+            >
+              {JSON.stringify(event.details, null, 2)}
+            </pre>
           ),
         }}
       />

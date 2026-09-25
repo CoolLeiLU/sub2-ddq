@@ -85,3 +85,7 @@ wheels/
 ._*
 Thumbs.db
 Desktop.ini
+
+# antd component styles are extracted at build time by
+# web/plugin-antd-static-styles.ts and imported by main.tsx.
+/web/src/styles/antd.css

@@ -1,16 +1,9 @@
 import { useEffect, useState } from 'react'
-import { Alert, Card, Progress, Table, Tag } from 'antd'
+import { Alert, Card, Progress, Table, Typography } from 'antd'
 
+import StatusTag from '../components/StatusTag'
 import { api, type Group } from '../api'
-
-const HEALTH_COLORS: Record<string, string> = {
-  HEALTHY: 'green',
-  DEGRADED: 'orange',
-  FUSED: 'red',
-  STALE: 'default',
-  WARMING_UP: 'blue',
-  EXCLUDED: 'default',
-}
+import { healthStyle, palette } from '../theme'
 
 /** Group inventory and the health of the channels backing each one. */
 export default function Groups() {
@@ -37,25 +30,34 @@ export default function Groups() {
         size="middle"
         pagination={{ pageSize: 20, showSizeChanger: false }}
         columns={[
-          { title: 'ID', dataIndex: 'group_id', width: 80 },
+          {
+            title: 'ID',
+            dataIndex: 'group_id',
+            width: 80,
+            render: (value: string) => <Typography.Text code>{value}</Typography.Text>,
+          },
           { title: '名称', dataIndex: 'name' },
           {
             title: '健康',
             dataIndex: 'health',
             width: 130,
-            render: (health: string) => (
-              <Tag color={HEALTH_COLORS[health] ?? 'default'}>{health}</Tag>
-            ),
+            render: (health: string) => <StatusTag style={healthStyle(health)} tooltip={health} />,
           },
           {
             title: '评分',
             dataIndex: 'score',
             width: 180,
             render: (score: number) => (
-              <Progress percent={Math.round(score ?? 0)} size="small" />
+              <Progress percent={Math.round(score ?? 0)} size="small" strokeColor={palette.primary} />
             ),
           },
-          { title: '渠道数', dataIndex: 'channel_count', width: 100 },
+          {
+            title: '渠道数',
+            dataIndex: 'channel_count',
+            width: 100,
+            align: 'right',
+            render: (value: number) => <span className="data-table">{value}</span>,
+          },
         ]}
       />
     </Card>
