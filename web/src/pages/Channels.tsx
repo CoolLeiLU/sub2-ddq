@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { App } from 'antd'
 
 import { api, type Channel, type Group } from '../api'
 import PageContainer from '../components/common/PageContainer'
@@ -11,6 +12,7 @@ import ChannelTable from '../components/channels/ChannelTable'
  * health status, latency and desired schedulable states.
  */
 export default function Channels() {
+  const { message } = App.useApp()
   const [channels, setChannels] = useState<Channel[]>([])
   const [groups, setGroups] = useState<Group[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -36,6 +38,23 @@ export default function Channels() {
       .then((page) => setGroups(page.items ?? []))
       .catch(() => setGroups([]))
   }, [])
+
+  // Excluding a channel changes what Guardian schedules, so the list is
+  // re-read afterwards rather than patched locally: the server derives health
+  // and desired state from the action.
+  const runAction = useCallback(
+    async (channel: Channel, action: 'exclude' | 'include', key: string) => {
+      try {
+        await api.channelAction(channel.channel_id, action, key)
+        message.success(action === 'exclude' ? '已排除该渠道' : '已恢复该渠道调度')
+      } catch (failure) {
+        message.error(failure instanceof Error ? failure.message : '操作失败')
+      } finally {
+        load()
+      }
+    },
+    [load, message],
+  )
 
   if (error) return <PageError message={error} onRetry={load} />
 
@@ -66,7 +85,7 @@ export default function Channels() {
         />
       }
     >
-      <ChannelTable channels={filtered} loading={loading} />
+      <ChannelTable channels={filtered} loading={loading} onAction={runAction} />
     </PageContainer>
   )
 }

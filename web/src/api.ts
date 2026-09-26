@@ -44,8 +44,13 @@ export interface Channel {
   last_evidence_at: string | null
 }
 
+/** The manual controls the channel action endpoint accepts. */
+export type ChannelAction = 'exclude' | 'include' | 'pause' | 'resume' | 'probe'
+
 export interface GroupAccount {
   account_id: string
+  /** Display name from Sub2API; empty when upstream omitted it. */
+  name?: string
   group_ids: string[]
   status: string
   schedulable: boolean
@@ -175,5 +180,17 @@ export const api = {
       method: 'POST',
       headers: { 'Idempotency-Key': idempotencyKey },
       body: JSON.stringify({ confirm }),
+    }),
+
+  /**
+   * Manual channel control. `exclude` stops Guardian from scheduling the
+   * channel until an operator includes it again; Guardian never restores a
+   * manually excluded channel on its own.
+   */
+  channelAction: (id: string, action: ChannelAction, idempotencyKey: string) =>
+    request<Channel>(`/channels/${encodeURIComponent(id)}/actions`, {
+      method: 'POST',
+      headers: { 'Idempotency-Key': idempotencyKey },
+      body: JSON.stringify({ action }),
     }),
 }

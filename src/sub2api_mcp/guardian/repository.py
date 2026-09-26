@@ -40,7 +40,17 @@ from .contracts import (
     UpstreamProbeSnapshot,
 )
 
-GUARDIAN_SCHEMA_VERSION = 12
+GUARDIAN_SCHEMA_VERSION = 13
+
+# Columns added after the PostgreSQL schema was first created.  ``CREATE TABLE
+# IF NOT EXISTS`` leaves an existing table untouched, so a new column has to be
+# added explicitly or the inserts that reference it fail on upgrade.  Each entry
+# is idempotent, which keeps a fresh deployment and an upgraded one converging
+# on the same shape.
+GUARDIAN_ADDITIVE_COLUMN_SQL = (
+    "ALTER TABLE guardian_account_observations "
+    "ADD COLUMN IF NOT EXISTS name TEXT NOT NULL DEFAULT ''",
+)
 
 GUARDIAN_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS guardian_metadata (
@@ -206,6 +216,7 @@ GUARDIAN_ACCOUNT_RECOVERY_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS guardian_account_observations (
     snapshot_id TEXT NOT NULL,
     account_id TEXT NOT NULL,
+    name TEXT NOT NULL DEFAULT '',
     group_ids_json TEXT NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('active', 'error', 'disabled', 'inactive')),
     schedulable BOOLEAN NOT NULL CHECK (schedulable IN (TRUE, FALSE)),
@@ -412,6 +423,8 @@ class GuardianRepository:
             for statement in GUARDIAN_ACCOUNT_RECOVERY_SCHEMA_SQL.split(";"):
                 if statement.strip():
                     await connection.execute(statement)
+            for statement in GUARDIAN_ADDITIVE_COLUMN_SQL:
+                await connection.execute(statement)
             await connection.execute(
                 "INSERT INTO guardian_metadata(key, value) VALUES('schema_version', $1) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -745,12 +758,13 @@ class GuardianRepository:
                     continue
                 await connection.execute(
                     "INSERT INTO guardian_account_observations("
-                    "snapshot_id, account_id, group_ids_json, status, schedulable, "
+                    "snapshot_id, account_id, name, group_ids_json, status, schedulable, "
                     "expired, temporary_unavailable, automatic_pause, observed_at"
-                    ") VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9) "
+                    ") VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) "
                     "ON CONFLICT(snapshot_id, account_id) DO NOTHING",
                     normalized_snapshot_id,
                     observation.account_id,
+                    observation.name,
                     _json(list(observation.group_ids)),
                     observation.status.value,
                     observation.schedulable,
@@ -845,6 +859,7 @@ class GuardianRepository:
             items.append(
                 {
                     "account_id": observation.account_id,
+                    "name": observation.name,
                     "group_ids": list(observation.group_ids),
                     "status": observation.status.value,
                     "schedulable": observation.schedulable,
@@ -2441,6 +2456,9 @@ class GuardianRepository:
             return GuardianAccountObservation.model_validate(
                 {
                     "account_id": row["account_id"],
+                    # Rows written before the name column existed read back as
+                    # an empty string rather than failing validation.
+                    "name": row["name"] if "name" in row_keys else "",
                     "group_ids": json.loads(row["group_ids_json"]),
                     "status": row["status"],
                     "schedulable": bool(row["schedulable"]),

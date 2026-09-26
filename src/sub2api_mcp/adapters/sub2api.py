@@ -212,6 +212,7 @@ class LegacySub2APIAdapter:
             account_observations=tuple(
                 AccountObservation(
                     account_id=account.account_id,
+                    name=account.name,
                     group_ids=account.group_ids,
                     status=AccountObservationStatus(account.status),
                     schedulable=account.schedulable,

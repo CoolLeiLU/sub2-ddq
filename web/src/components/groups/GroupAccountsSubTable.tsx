@@ -27,8 +27,21 @@ export default function GroupAccountsSubTable({ accounts }: Props) {
         {
           title: '账号 ID',
           dataIndex: 'account_id',
-          width: 120,
+          width: 100,
           render: (v: string) => <DataCell>{v}</DataCell>,
+        },
+        {
+          title: '账号名称',
+          dataIndex: 'name',
+          width: 200,
+          render: (name: string | undefined) =>
+            name ? (
+              <span className="wrap-anywhere">{name}</span>
+            ) : (
+              // Older snapshots predate the name column; say so rather than
+              // showing an empty cell that reads as a rendering fault.
+              <Typography.Text type="secondary">—</Typography.Text>
+            ),
         },
         {
           title: '健康状态',

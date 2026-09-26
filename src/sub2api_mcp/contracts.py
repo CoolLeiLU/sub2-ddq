@@ -274,6 +274,9 @@ class AccountObservationStatus(StrEnum):
 
 class AccountObservation(StrictModel):
     account_id: str = Field(pattern=r"^[1-9][0-9]{0,19}$")
+    # Display name as Sub2API reports it. Empty when the upstream omitted it;
+    # the console falls back to the account ID in that case.
+    name: str = Field(default="", max_length=200)
     group_ids: tuple[str, ...] = Field(default=(), max_length=100)
     status: AccountObservationStatus
     schedulable: bool
