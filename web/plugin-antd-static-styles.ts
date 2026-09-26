@@ -22,14 +22,20 @@ import { dirname, resolve } from 'node:path'
 import {
   Alert,
   App,
+  Badge,
   Button,
   Card,
   Col,
+  Collapse,
   ConfigProvider,
   Descriptions,
+  Divider,
+  Empty,
+  Flex,
   Form,
   Input,
   Layout,
+  List,
   Menu,
   Popconfirm,
   Progress,
@@ -47,7 +53,7 @@ import {
 import zhCN from 'antd/locale/zh_CN.js'
 
 import { themeConfig } from './src/theme'
-import StatusTag from './src/components/StatusTag'
+import HealthBadge from './src/components/common/HealthBadge'
 
 const { Header, Sider, Content } = Layout
 
@@ -56,7 +62,7 @@ const columns = [
     title: 'A',
     dataIndex: 'a',
     render: () =>
-      React.createElement(StatusTag, { style: { tone: 'success', label: '健康' } }),
+      React.createElement(HealthBadge, { style: { tone: 'success', label: '健康' } }),
   },
   { title: 'B', dataIndex: 'b' },
 ]
@@ -161,6 +167,25 @@ function Showcase() {
             React.createElement(Descriptions.Item, { label: 'L', children: 'V' }),
           ),
         ),
+        React.createElement(
+          Flex,
+          { vertical: true, gap: 8 },
+          React.createElement(Badge, { status: 'success', text: 'ok' }),
+          React.createElement(Badge, { status: 'processing', text: 'running' }),
+          React.createElement(Badge, { status: 'error', text: 'err' }),
+          React.createElement(Badge, { status: 'warning', text: 'warn' }),
+          React.createElement(Badge, { status: 'default', text: 'idle' }),
+        ),
+        React.createElement(
+          List,
+          { dataSource: ['a'], split: false, renderItem: (item: unknown) => React.createElement(List.Item, null, String(item)) },
+        ),
+        React.createElement(
+          Collapse,
+          { items: [{ key: '1', label: 'L', children: 'C' }] },
+        ),
+        React.createElement(Divider, null),
+        React.createElement(Empty, { description: 'empty' }),
         React.createElement(Tag, { color: 'success' }, 'tag'),
         React.createElement(
           Tooltip,

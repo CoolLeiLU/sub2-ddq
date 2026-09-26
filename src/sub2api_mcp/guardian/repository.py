@@ -822,6 +822,40 @@ class GuardianRepository:
             )
         return [self._account_observation_from_row(row) for row in rows]
 
+    async def list_group_accounts(self) -> list[dict[str, Any]]:
+        """Return the accounts of the newest snapshot, each with its groups.
+
+        The console needs the account-level view behind each group.  Accounts
+        outnumber groups and one account can serve several groups, so the rows
+        stay flat and carry ``group_ids``; callers bucket them.  Only
+        account-level state is exposed — never credentials or the addresses
+        that identify a human account holder.
+        """
+
+        async with self._database.acquire() as connection:
+            rows = await connection.fetch(
+                "SELECT * FROM guardian_account_observations WHERE snapshot_id = ("
+                "SELECT snapshot_id FROM guardian_account_observations "
+                "ORDER BY observed_at DESC, snapshot_id DESC LIMIT 1"
+                ") ORDER BY CAST(account_id AS INTEGER)"
+            )
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            observation = self._account_observation_from_row(row)
+            items.append(
+                {
+                    "account_id": observation.account_id,
+                    "group_ids": list(observation.group_ids),
+                    "status": observation.status.value,
+                    "schedulable": observation.schedulable,
+                    "expired": observation.expired,
+                    "temporary_unavailable": observation.temporary_unavailable,
+                    "automatic_pause": observation.automatic_pause,
+                    "observed_at": row["observed_at"],
+                }
+            )
+        return items
+
     async def latest_abnormal_account_snapshot(self) -> str | None:
         async with self._database.acquire() as connection:
             row = await connection.fetchrow(

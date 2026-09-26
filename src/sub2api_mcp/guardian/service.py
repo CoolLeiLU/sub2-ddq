@@ -799,8 +799,17 @@ class GuardianService:
         policy = await self.repository.get_policy()
         excluded = policy.scope.excluded_group_ids
         items = await self.repository.list_groups()
+        # One account can serve several groups, so bucket a single read rather
+        # than querying per group.
+        accounts_by_group: dict[str, list[dict[str, Any]]] = {}
+        for account in await self.repository.list_group_accounts():
+            for group_id in account["group_ids"]:
+                accounts_by_group.setdefault(group_id, []).append(account)
         for item in items:
             item["excluded"] = item["group_id"] in excluded
+            accounts = accounts_by_group.get(item["group_id"], [])
+            item["accounts"] = accounts
+            item["account_count"] = len(accounts)
         return {"items": items}
 
     async def update_group_policy(self, group_id: str, patch: dict[str, Any]) -> dict[str, Any]:

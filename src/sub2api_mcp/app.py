@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import uuid
 from collections.abc import Awaitable, Callable
@@ -44,6 +45,8 @@ from .scheduler import SchedulerPolicy, SchedulerService
 from .service import ServiceOperations, Sub2APIService
 from .session import SessionCodec
 from .tools import Sub2APIMCPServer
+
+_LOGGER = logging.getLogger("sub2api_mcp.app")
 
 
 class RuntimeOperations(ServiceOperations, Protocol):
@@ -95,6 +98,34 @@ class Runtime:
     started: bool = False
 
 
+def _monitored_scope_resolver(
+    guardian_repository: GuardianRepository,
+) -> Callable[[], Awaitable[frozenset[str] | None]]:
+    """Resolve the group IDs Guardian must not probe or recover.
+
+    The adapter already knows every group the upstream exposes, so this
+    returns only the ones the operator has taken out of scope and the caller
+    subtracts them.  ``all`` mode contributes the explicit exclusions;
+    ``selected`` mode is not expressed here because narrowing to an allowed
+    list needs the upstream's group inventory, which the account-recovery
+    service already applies from the policy directly.
+
+    A failed policy read returns ``None`` so the caller keeps its
+    conservative default rather than silently treating every group as out of
+    scope.
+    """
+
+    async def resolve() -> frozenset[str] | None:
+        try:
+            policy = await guardian_repository.get_policy()
+        except Exception:
+            _LOGGER.exception("guardian_monitored_scope_unavailable")
+            return None
+        return frozenset(policy.scope.excluded_group_ids) or None
+
+    return resolve
+
+
 def build_runtime(
     settings: Settings,
     *,
@@ -109,6 +140,13 @@ def build_runtime(
     database = Database(settings.database_url)
     repository = SqliteRepository(database)
     guardian_repository = GuardianRepository(database)
+    # The runtime operations are the Guardian account probe/mutation surface.
+    # Teach them the operator's managed scope so an excluded group stops being
+    # probed and recovered; without this the adapter only knows "every group
+    # the upstream happens to have".
+    monitored_scope = getattr(operations, "bind_monitored_scope", None)
+    if callable(monitored_scope):
+        monitored_scope(_monitored_scope_resolver(guardian_repository))
     # Console sign-in is optional: without a password hash the REST API stays
     # API-key only and the login route reports that it is disabled.
     sessions: SessionCodec | None = None

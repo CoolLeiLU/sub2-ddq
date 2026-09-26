@@ -1,17 +1,24 @@
-import { useEffect, useState } from 'react'
-import { Alert, Card, Progress, Table, Typography } from 'antd'
+import { useCallback, useEffect, useState } from 'react'
+import { Button } from 'antd'
+import { ReloadOutlined } from '@ant-design/icons'
 
-import StatusTag from '../components/StatusTag'
 import { api, type Group } from '../api'
-import { healthStyle, palette } from '../theme'
+import PageContainer from '../components/common/PageContainer'
+import PageError from '../components/common/PageError'
+import GroupTable from '../components/groups/GroupTable'
 
-/** Group inventory and the health of the channels backing each one. */
+/**
+ * Groups topology page: displays group health scores and accounts managed
+ * under each group.
+ */
 export default function Groups() {
   const [groups, setGroups] = useState<Group[]>([])
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
 
-  useEffect(() => {
+  const load = useCallback(() => {
+    setLoading(true)
+    setError(null)
     api
       .groups()
       .then((page) => setGroups(page.items ?? []))
@@ -19,47 +26,21 @@ export default function Groups() {
       .finally(() => setLoading(false))
   }, [])
 
-  if (error) return <Alert type="error" message={error} showIcon />
+  useEffect(load, [load])
+
+  if (error) return <PageError message={error} onRetry={load} />
 
   return (
-    <Card title="分组">
-      <Table<Group>
-        loading={loading}
-        rowKey="group_id"
-        dataSource={groups}
-        size="middle"
-        pagination={{ pageSize: 20, showSizeChanger: false }}
-        columns={[
-          {
-            title: 'ID',
-            dataIndex: 'group_id',
-            width: 80,
-            render: (value: string) => <Typography.Text code>{value}</Typography.Text>,
-          },
-          { title: '名称', dataIndex: 'name' },
-          {
-            title: '健康',
-            dataIndex: 'health',
-            width: 130,
-            render: (health: string) => <StatusTag style={healthStyle(health)} tooltip={health} />,
-          },
-          {
-            title: '评分',
-            dataIndex: 'score',
-            width: 180,
-            render: (score: number) => (
-              <Progress percent={Math.round(score ?? 0)} size="small" strokeColor={palette.primary} />
-            ),
-          },
-          {
-            title: '渠道数',
-            dataIndex: 'channel_count',
-            width: 100,
-            align: 'right',
-            render: (value: number) => <span className="data-table">{value}</span>,
-          },
-        ]}
-      />
-    </Card>
+    <PageContainer
+      title="分组拓扑管理"
+      subTitle="查看各业务分组的健康度评分及分组内账号的生命周期状态"
+      extra={
+        <Button icon={<ReloadOutlined />} onClick={load} loading={loading}>
+          刷新
+        </Button>
+      }
+    >
+      <GroupTable groups={groups} loading={loading} />
+    </PageContainer>
   )
 }

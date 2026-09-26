@@ -44,12 +44,29 @@ export interface Channel {
   last_evidence_at: string | null
 }
 
+export interface GroupAccount {
+  account_id: string
+  group_ids: string[]
+  status: string
+  schedulable: boolean
+  expired: boolean
+  temporary_unavailable: boolean
+  automatic_pause: boolean
+  observed_at: string | null
+}
+
 export interface Group {
   group_id: string
   name: string
   health: string
   score: number
   channel_count: number
+  available_count: number
+  latency_ms: number | null
+  /** True when the operator excluded this group from Guardian's scope. */
+  excluded: boolean
+  account_count: number
+  accounts: GroupAccount[]
   details: Record<string, unknown>
 }
 
@@ -129,7 +146,10 @@ export const api = {
       body: JSON.stringify({ ...body, expected_revision: expectedRevision }),
     }),
 
-  channels: () => request<{ items: Channel[]; next_cursor: string | null }>('/channels'),
+  channels: (groupId?: string) =>
+    request<{ items: Channel[]; next_cursor: string | null }>(
+      groupId ? `/channels?group_id=${encodeURIComponent(groupId)}` : '/channels',
+    ),
 
   channel: (id: string) => request<Channel>(`/channels/${id}`),
 

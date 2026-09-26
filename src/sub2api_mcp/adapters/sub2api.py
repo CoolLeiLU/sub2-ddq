@@ -53,6 +53,11 @@ from ..guardian.contracts import (
 
 _SNAPSHOT_ADAPTER = TypeAdapter(dict[str, Any])
 
+# Resolves the groups Guardian is allowed to touch, from the live policy.
+# Returns ``None`` when the scope cannot be read, in which case callers fall
+# back to the conservative "known upstream groups" behaviour.
+MonitoredScopeResolver = Callable[[], Awaitable[frozenset[str] | None]]
+
 _REASON_MAP = {
     "channel_test_failed": AccountQuarantineReason.CHANNEL_TEST_FAILED,
     "slow_first_token": AccountQuarantineReason.SLOW_FIRST_TOKEN,
@@ -154,14 +159,26 @@ class LegacySub2APIAdapter:
         maintenance_policy: MaintenancePolicy | None = None,
         probe_cache_ttl_seconds: int = 120,
         probe_freshness_seconds: int = 180,
+        monitored_scope: MonitoredScopeResolver | None = None,
     ) -> None:
         self._client = client
         self._maintenance_policy = maintenance_policy or MaintenancePolicy()
         self._probe_cache_ttl_seconds = max(30, int(probe_cache_ttl_seconds))
         self._probe_freshness_seconds = max(30, int(probe_freshness_seconds))
         self._maintenance = MaintenanceServiceFactory.create(client, self._maintenance_policy)
+        self._monitored_scope = monitored_scope
         self._last_probes: list[ChannelProbe] = []
         self._last_probe_captured_at: datetime | None = None
+
+    def bind_monitored_scope(self, resolver: MonitoredScopeResolver) -> None:
+        """Attach the managed-scope resolver after the policy store exists.
+
+        The adapter and the Guardian repository are constructed from the same
+        settings, but the repository is built later; binding here keeps the
+        adapter free of a Guardian import.
+        """
+
+        self._monitored_scope = resolver
 
     async def probe(self) -> ProbeResult:
         probes, accounts, groups = await self._client.fetch_probe_with_accounts()
@@ -223,7 +240,26 @@ class LegacySub2APIAdapter:
         # unresolved.  The admin group list is the authoritative managed
         # scope.
         bound = frozenset(probe.accounts.group_id for probe in probes if probe.accounts is not None)
-        return bound | await self._client.fetch_known_group_ids()
+        reachable = bound | await self._client.fetch_known_group_ids()
+        if self._monitored_scope is None:
+            return reachable
+        # An excluded group must stop being probed and recovered entirely.
+        # ``reachable`` is only "every group the upstream knows about", which
+        # is not the same thing as the operator's managed scope, so drop the
+        # exclusions resolved from the live policy.
+        excluded = await self._monitored_scope()
+        return reachable if excluded is None else reachable - excluded
+
+    async def _resolved_excluded_groups(self) -> frozenset[str] | None:
+        """Group IDs the operator has excluded, or ``None`` when unknown.
+
+        ``None`` means "no exclusions to apply", which lets the health sweep
+        keep its own default rather than treat every group as out of scope.
+        """
+
+        if self._monitored_scope is None:
+            return None
+        return await self._monitored_scope()
 
     @staticmethod
     def _guardian_account_block_reason(state: AccountDispatchState) -> str | None:
@@ -706,6 +742,7 @@ class LegacySub2APIAdapter:
             now=now,
             excluded_account_ids=excluded_account_ids,
             observer=observer,
+            excluded_group_ids=await self._resolved_excluded_groups(),
         )
         outcomes = [
             MaintenanceOutcome(

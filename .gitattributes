@@ -1,0 +1,21 @@
+# Normalize line endings for every text file the repository tracks.
+#
+# The project is edited on Windows as well as Linux, and an editor that wrote
+# CRLF turned a ~100-line change into a 6400-line diff by rewriting every line
+# of every touched file. Declaring LF here keeps the working tree, the object
+# store and CI in agreement regardless of the editor used.
+#
+# `eol=lf` stores LF in the repository and checks out LF in the working tree,
+# which is what the container build and the Python/Node toolchains expect.
+
+* text=auto eol=lf
+
+# Binary assets must never be normalized.
+*.png binary
+*.ttc binary
+*.woff binary
+*.woff2 binary
+
+# Windows-only launcher scripts keep their native endings.
+*.bat text eol=crlf
+*.cmd text eol=crlf

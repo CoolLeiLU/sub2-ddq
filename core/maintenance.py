@@ -494,6 +494,7 @@ class MaintenanceCoordinator:
         now: datetime | None = None,
         excluded_account_ids: Set[str] = frozenset(),
         observer: MaintenanceMutationObserver | None = None,
+        excluded_group_ids: frozenset[str] | None = None,
     ) -> MaintenanceReport:
         if not (
             self._policy.channel_account_sweep_enabled
@@ -511,12 +512,15 @@ class MaintenanceCoordinator:
                     notices=(MaintenanceNotice(code="AMBIGUOUS_GROUP_MAPPING"),)
                 )
             # Usage-log binding resolves only the base group a shared channel
-            # served; every known upstream group is managed scope here.
+            # served; every known upstream group is managed scope here, minus
+            # whatever the caller has excluded.
             monitored_group_ids = known_group_ids | frozenset(
                 probe.accounts.group_id
                 for probe in probes
                 if probe.accounts is not None
             )
+            if excluded_group_ids is not None:
+                monitored_group_ids -= excluded_group_ids
             current_closed_ids = {
                 account.account_id
                 for account in accounts
