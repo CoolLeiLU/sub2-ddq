@@ -198,12 +198,24 @@ class SqliteRepository:
         return self._job_from_row(row) if row is not None else None
 
     @staticmethod
-    def _encode_cursor(created_at: datetime, job_id: str) -> str:
+    def _encode_cursor(created_at: datetime | str, job_id: str) -> str:
+        """Encode a paging cursor.
+
+        Two shapes share this helper: job cursors carry a timestamp, quarantine
+        cursors carry a scope string. Both are JSON-encoded and base64url'd.
+        """
+
         raw = _json([created_at, job_id]).encode()
         return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
     @staticmethod
-    def _decode_cursor(cursor: str) -> tuple[datetime, str]:
+    def _decode_cursor(cursor: str) -> tuple[str, str]:
+        """Decode a paging cursor into its two raw string halves.
+
+        The caller decides what the first half means: ``list_jobs`` parses it as
+        a timestamp, ``list_account_quarantines`` reads it as a scope marker.
+        """
+
         if len(cursor) > 4096:
             raise ServiceError("INVALID_CURSOR", "The cursor is invalid")
         try:
@@ -214,14 +226,20 @@ class SqliteRepository:
             value = cast(list[object], raw_value)
             if len(value) != 2 or not all(isinstance(item, str) for item in value):
                 raise ValueError
-            # ``_encode_cursor`` writes the timestamp with ``isoformat``; return
-            # a datetime so asyncpg can bind it against the TIMESTAMPTZ column.
-            created_at = datetime.fromisoformat(value[0].replace("Z", "+00:00"))
-            if created_at.tzinfo is None:
-                created_at = created_at.replace(tzinfo=UTC)
-            return created_at, cast(str, value[1])
+            return cast(str, value[0]), cast(str, value[1])
         except (ValueError, UnicodeError, json.JSONDecodeError) as exc:
             raise ServiceError("INVALID_CURSOR", "The job cursor is invalid") from exc
+
+    @staticmethod
+    def _cursor_timestamp(value: str) -> datetime:
+        """Parse the timestamp half of a job cursor.
+
+        asyncpg needs a datetime to bind against the TIMESTAMPTZ column; a bare
+        string leaves the parameter type indeterminate and the query fails.
+        """
+
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
     async def list_jobs(
         self,
@@ -241,7 +259,8 @@ class SqliteRepository:
             parameters.append(status.value)
             conditions.append(f"status = ${len(parameters)}")
         if cursor:
-            created_at, job_id = self._decode_cursor(cursor)
+            encoded_time, job_id = self._decode_cursor(cursor)
+            created_at = self._cursor_timestamp(encoded_time)
             parameters.extend((created_at, job_id))
             timestamp_index = len(parameters) - 1
             job_index = len(parameters)
