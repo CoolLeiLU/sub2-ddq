@@ -50,6 +50,8 @@ GUARDIAN_SCHEMA_VERSION = 13
 GUARDIAN_ADDITIVE_COLUMN_SQL = (
     "ALTER TABLE guardian_account_observations "
     "ADD COLUMN IF NOT EXISTS name TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE guardian_account_observations "
+    "ADD COLUMN IF NOT EXISTS account_type TEXT NOT NULL DEFAULT 'apikey'",
 )
 
 GUARDIAN_SCHEMA_SQL = """
@@ -223,6 +225,7 @@ CREATE TABLE IF NOT EXISTS guardian_account_observations (
     expired BOOLEAN NOT NULL CHECK (expired IN (TRUE, FALSE)),
     temporary_unavailable BOOLEAN NOT NULL CHECK (temporary_unavailable IN (TRUE, FALSE)),
     automatic_pause BOOLEAN NOT NULL DEFAULT FALSE CHECK (automatic_pause IN (TRUE, FALSE)),
+    account_type TEXT NOT NULL DEFAULT 'apikey',
     observed_at TIMESTAMPTZ NOT NULL,
     PRIMARY KEY(snapshot_id, account_id)
 );
@@ -759,8 +762,8 @@ class GuardianRepository:
                 await connection.execute(
                     "INSERT INTO guardian_account_observations("
                     "snapshot_id, account_id, name, group_ids_json, status, schedulable, "
-                    "expired, temporary_unavailable, automatic_pause, observed_at"
-                    ") VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) "
+                    "expired, temporary_unavailable, automatic_pause, account_type, observed_at"
+                    ") VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) "
                     "ON CONFLICT(snapshot_id, account_id) DO NOTHING",
                     normalized_snapshot_id,
                     observation.account_id,
@@ -771,6 +774,7 @@ class GuardianRepository:
                     observation.expired,
                     observation.temporary_unavailable,
                     observation.automatic_pause,
+                    observation.account_type,
                     observed_at,
                 )
                 inserted += 1
@@ -2466,6 +2470,11 @@ class GuardianRepository:
                     "temporary_unavailable": bool(row["temporary_unavailable"]),
                     "automatic_pause": (
                         bool(row["automatic_pause"]) if "automatic_pause" in row_keys else False
+                    ),
+                    "account_type": (
+                        str(row["account_type"])
+                        if "account_type" in row_keys and row["account_type"]
+                        else "apikey"
                     ),
                 }
             )

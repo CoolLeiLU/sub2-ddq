@@ -60,6 +60,8 @@ def _classification(
     *,
     quarantined_account_ids: frozenset[str],
 ) -> tuple[AccountRecoveryClassification, str]:
+    if account.account_type.strip().lower() in {"oauth", "auth", "setup-token"}:
+        return AccountRecoveryClassification.EXCLUDED, "oauth_account"
     if account.expired:
         return AccountRecoveryClassification.EXCLUDED, "expired"
     if account.status is GuardianAccountStatus.ACTIVE and not account.schedulable:
@@ -456,6 +458,8 @@ class AccountRecoveryExecutor:
         probe_mode: str = "",
     ) -> tuple[AccountRecoveryResult, str, bool, bool]:
         account_id = initial_account.account_id
+        if initial_account.account_type.strip().lower() in {"oauth", "auth", "setup-token"}:
+            return AccountRecoveryResult.SKIPPED, "oauth_account_excluded", False, False
         effective_model = probe_model
         preferred_model = await self._repository.get_account_preferred_model(account_id)
         if preferred_model:

@@ -43,6 +43,7 @@ class AccountDispatchState:
     expired: bool = False
     temporary_unavailable: bool = False
     automatic_pause: bool = False
+    account_type: str = "apikey"
 
 
 @dataclass(frozen=True, slots=True)
@@ -392,6 +393,7 @@ class _ChannelAccountSweepService:
         return (
             bool(account.group_ids)
             and not account.expired
+            and account.account_type.strip().lower() not in {"oauth", "auth", "setup-token"}
             and account.account_id not in already_adjusted
             and account.status not in {"inactive", "disabled"}
             and not (account.status == "active" and not account.schedulable)
@@ -425,6 +427,7 @@ class _AccountLogGuardService:
             account.account_id: account
             for account in accounts
             if _MinimumUsablePool._is_usable(account)
+            and account.account_type.strip().lower() not in {"oauth", "auth", "setup-token"}
             and bool(account.group_ids)
             and set(account.group_ids) <= monitored_group_ids
             and account.account_id not in already_adjusted

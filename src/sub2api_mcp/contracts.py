@@ -289,6 +289,7 @@ class AccountObservation(StrictModel):
     # the automatic interpretation.  A missing/false value remains fail-safe
     # and is treated as a human pause by Guardian.
     automatic_pause: bool = False
+    account_type: str = Field(default="apikey", max_length=50)
 
     @field_validator("group_ids")
     @classmethod

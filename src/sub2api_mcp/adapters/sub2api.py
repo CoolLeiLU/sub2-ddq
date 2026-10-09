@@ -219,6 +219,7 @@ class LegacySub2APIAdapter:
                     expired=account.expired,
                     temporary_unavailable=account.temporary_unavailable,
                     automatic_pause=account.automatic_pause,
+                    account_type=account.account_type,
                 )
                 for account in sorted(accounts, key=lambda item: int(item.account_id))
             ),
@@ -266,6 +267,8 @@ class LegacySub2APIAdapter:
     def _guardian_account_block_reason(state: AccountDispatchState) -> str | None:
         if not state.success:
             return "account_state_unavailable"
+        if state.account_type.strip().lower() in {"oauth", "auth", "setup-token"}:
+            return "oauth_account_excluded"
         if state.expired:
             return "expired"
         # An automatic pause is exactly the state Guardian is allowed to
@@ -333,6 +336,15 @@ class LegacySub2APIAdapter:
                 account_id=account_id,
                 result=AccountTestExecutionResult.INDETERMINATE,
                 reason="test_context_invalid",
+            )
+        if initial_account.account_type.strip().lower() in {"oauth", "auth", "setup-token"}:
+            return GuardianAccountTestOutcome(
+                account_id=account_id,
+                result=AccountTestExecutionResult.SKIPPED,
+                reason="oauth_account_excluded",
+                observed_status=initial_account.status,
+                observed_schedulable=initial_account.schedulable,
+                observed_automatic_pause=initial_account.automatic_pause,
             )
         initial_is_manual_pause = (
             initial_account.status is GuardianAccountStatus.ACTIVE

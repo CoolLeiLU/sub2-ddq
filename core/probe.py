@@ -181,6 +181,7 @@ class AccountGroupState:
     expired: bool = False
     temporary_unavailable: bool = False
     automatic_pause: bool = False
+    account_type: str = "apikey"
 
 
 @dataclass(frozen=True, slots=True)
@@ -648,6 +649,10 @@ def parse_account_group_state_page(
             bucket = "temporary" if is_temporary else "available"
         else:
             bucket = "closed"
+        account_type = (
+            _bounded_text(item.get("type"), "account snapshot type").lower()
+            or "apikey"
+        )
         states.append(
             AccountGroupState(
                 account_id=account_id,
@@ -659,6 +664,7 @@ def parse_account_group_state_page(
                 expired=is_expired,
                 temporary_unavailable=is_temporary,
                 automatic_pause=automatic_pause,
+                account_type=account_type,
             )
         )
     return states, pages

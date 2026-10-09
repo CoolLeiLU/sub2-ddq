@@ -877,6 +877,10 @@ class MaintenanceApiAdapter:
                 status=status,
                 schedulable=schedulable,
             )
+            account_type = (
+                _bounded_text(data.get("type"), "account dispatch type").lower()
+                or "apikey"
+            )
         except (MonitorRequestError, MonitorDataError):
             return AccountDispatchState(normalized_id, success=False)
         return AccountDispatchState(
@@ -887,6 +891,7 @@ class MaintenanceApiAdapter:
             expired=expired,
             temporary_unavailable=temporary_unavailable,
             automatic_pause=automatic_pause,
+            account_type=account_type,
         )
 
     async def fetch_account_dispatch_state(
