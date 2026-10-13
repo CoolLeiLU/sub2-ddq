@@ -21,6 +21,7 @@ from maintenance import (
 from probe import (
     AccountGroupState,
     MonitorDataError,
+    _bounded_text,
     parse_account_group_state_page,
 )
 from recovery import account_test_result, recovered_account_is_normal
