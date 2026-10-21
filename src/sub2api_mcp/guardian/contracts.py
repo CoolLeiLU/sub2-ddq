@@ -350,6 +350,12 @@ class TrafficPolicy(StrictModel):
 
 class SamplingPolicy(StrictModel):
     mode: SamplingMode = SamplingMode.SHARED
+    # How often the scheduler publishes a shared snapshot.  The default is not
+    # a safe upper bound on freshness: the publish interval is configurable,
+    # while the freshness window below was a fixed 180 seconds and silently
+    # marked every channel stale on slower deployments.  Configured windows
+    # are therefore treated as floors and widened by the observed cadence (see
+    # ``effective_observation_windows``).
     shared_snapshot_interval_seconds: int = Field(default=60, ge=30, le=3600)
     bucket_seconds: int = Field(default=60, ge=30, le=300)
     fresh_seconds: int = Field(default=180, ge=30, le=3600)
@@ -363,6 +369,12 @@ class SamplingPolicy(StrictModel):
         if self.bucket_seconds > self.fresh_seconds:
             raise ValueError("bucket_seconds cannot exceed fresh_seconds")
         return self
+
+    @property
+    def observation_window_seconds(self) -> int:
+        """Shortest evidence age that still counts as a live observation."""
+
+        return max(self.fresh_seconds, 2 * self.shared_snapshot_interval_seconds)
 
 
 class ConfidencePolicy(StrictModel):

@@ -31,7 +31,11 @@ from .contracts import (
 )
 from .repository import GuardianRepository
 from .sampling import fuse_evidence_buckets
-from .scoring import calculate_health_score, calculate_health_score_v2
+from .scoring import (
+    calculate_health_score,
+    calculate_health_score_v2,
+    effective_observation_windows,
+)
 from .state_machine import decide_channel_state
 
 
@@ -53,6 +57,61 @@ def _stored_datetime(details: dict[str, Any], key: str) -> datetime | None:
     except ValueError:
         return None
     return parsed if parsed.tzinfo is not None else None
+
+
+# Monitor statuses that make the group's account pool worth probing.  A
+# ``degraded`` monitor means requests are still served but slowly or with
+# partial failures — exactly the state where one bad account drags the whole
+# group down — so it must expand to account recovery just like a hard failure.
+# ``operational`` and ``unknown`` deliberately do not.
+_CHANNEL_ERROR_STATUSES = frozenset({"degraded", "failed", "error"})
+
+
+def _distinct_evidence(evidence: list[GuardianEvidence]) -> list[GuardianEvidence]:
+    """Drop repeated reads of one upstream observation, keeping list order.
+
+    Evidence is ordered newest first, so the first occurrence of an
+    ``(source, source_event_id)`` pair is the one the breaker should see.
+    """
+
+    seen: set[tuple[GuardianSampleSource, str]] = set()
+    distinct: list[GuardianEvidence] = []
+    for item in evidence:
+        identity = (item.source, item.source_event_id)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        distinct.append(item)
+    return distinct
+
+
+def _channel_error_episode_required(
+    *,
+    status: str,
+    entry_is_fresh: bool,
+    group_id: str | None,
+    available_count: int | None = None,
+    error_count: int | None = None,
+    temporary_unavailable_count: int | None = None,
+    closed_count: int | None = None,
+) -> bool:
+    """Whether this monitor observation should open an account-recovery episode.
+
+    A ``failed``/``error`` monitor always is: the channel is not serving, and
+    the whole pool has to be probed to find which accounts are unusable.  A
+    ``degraded`` monitor is only actionable when the group behind it already
+    shows unusable accounts; otherwise it is a latency problem and probing
+    every healthy account would risk mass-disabling them on timeouts.
+    """
+
+    if not entry_is_fresh or group_id is None or status not in _CHANNEL_ERROR_STATUSES:
+        return False
+    if status != "degraded":
+        return True
+    unavailable = (error_count or 0) + (temporary_unavailable_count or 0) + (closed_count or 0)
+    if available_count is None:
+        return False
+    return unavailable > 0
 
 
 def _scope_decision(
@@ -317,61 +376,85 @@ class GuardianEngine:
             if entry.observed_at is None:
                 entry_observed_at = captured_at
                 entry_is_fresh = True
+                entry_is_within_expire = True
             else:
                 entry_observed_at = entry.observed_at
-                entry_is_fresh = now - entry_observed_at <= timedelta(
-                    seconds=policy.sampling.fresh_seconds
+                # The upstream monitor re-checks on its own cadence, which is
+                # usually far slower than the local snapshot cadence.  Judge
+                # freshness in observation windows, not in a fixed 180
+                # seconds, or a healthy channel whose monitor checked twenty
+                # minutes ago is treated as unobserved.
+                entry_fresh_seconds, entry_expire_seconds = effective_observation_windows(
+                    policy.sampling
                 )
+                entry_age = now - entry_observed_at
+                entry_is_fresh = entry_age <= timedelta(seconds=entry_fresh_seconds)
+                entry_is_within_expire = entry_age <= timedelta(seconds=entry_expire_seconds)
             if snapshot_id is not None and captured_at is not None:
                 account_recovery_active = (
                     policy.enabled
                     and policy.account_recovery.enabled
                     and policy.account_recovery.owner is AccountRecoveryOwner.GUARDIAN
                 )
+                trigger_group_id = entry.group_id
                 if (
                     account_recovery_active
-                    and entry_is_fresh
-                    and entry.status in {"failed", "error"}
-                    and entry.group_id is not None
+                    and trigger_group_id is not None
+                    and _channel_error_episode_required(
+                        status=entry.status,
+                        entry_is_fresh=entry_is_fresh,
+                        group_id=trigger_group_id,
+                        available_count=entry.available_count,
+                        error_count=entry.error_count,
+                        temporary_unavailable_count=entry.temporary_unavailable_count,
+                        closed_count=entry.closed_count,
+                    )
                 ):
                     existing_episode = await self.repository.get_open_channel_error_episode(
                         entry.monitor_id
                     )
-                    if existing_episode is not None and existing_episode.group_id != entry.group_id:
+                    if (
+                        existing_episode is not None
+                        and existing_episode.group_id != trigger_group_id
+                    ):
                         channel_mapping_conflicts += 1
                         await self.repository.add_event(
                             event_type="CHANNEL_GROUP_MAPPING_CONFLICT",
                             severity="WARNING",
                             channel_id=entry.monitor_id,
-                            group_id=entry.group_id,
+                            group_id=trigger_group_id,
                             message=(
                                 "Skipped channel-error expansion because the open "
                                 "episode has a different group mapping"
                             ),
                             details={
                                 "episode_group_id": existing_episode.group_id,
-                                "observed_group_id": entry.group_id,
+                                "observed_group_id": trigger_group_id,
                                 "snapshot_id": snapshot_id,
                             },
                         )
                     else:
                         episode = await self.repository.open_channel_error_episode(
                             channel_id=entry.monitor_id,
-                            group_id=entry.group_id,
+                            group_id=trigger_group_id,
                             snapshot_id=snapshot_id,
                             opened_at=entry_observed_at or now,
                         )
-                        trigger_target = (episode.channel_id, entry.group_id)
+                        trigger_target = (episode.channel_id, trigger_group_id)
                         if trigger_target not in seen_channel_triggers:
                             seen_channel_triggers.add(trigger_target)
                             account_recovery_triggers.append(
                                 {
                                     "episode_id": episode.episode_id,
                                     "channel_id": episode.channel_id,
-                                    "group_id": entry.group_id,
+                                    "group_id": trigger_group_id,
                                 }
                             )
-                elif entry_is_fresh:
+                elif entry_is_within_expire:
+                    # Only an observation we can still trust may close an
+                    # episode.  Silence past the expire window is unknown, not
+                    # recovery, so the episode stays open until a real
+                    # healthy check arrives.
                     await self.repository.close_channel_error_episode(
                         entry.monitor_id,
                         closed_at=entry_observed_at or now,
@@ -478,8 +561,16 @@ class GuardianEngine:
                 evidence_sources = sorted(
                     {source.value for bucket in fused_buckets for source in bucket.sources}
                 )
-                recent_events = tuple(item.event_type for item in evidence)
-                recent_ttfb = tuple(item.ttfb_ms for item in evidence if item.ttfb_ms is not None)
+                # Rows written before evidence de-duplication repeat the same
+                # upstream observation.  Count each observation once so the
+                # breaker's "N failures in the window" is about failures, not
+                # about how often the monitor was read.
+                distinct_evidence = _distinct_evidence(evidence)
+                recent_events = tuple(item.event_type for item in distinct_evidence)
+                recent_ttfb = tuple(
+                    item.ttfb_ms for item in distinct_evidence if item.ttfb_ms is not None
+                )
+                evidence = distinct_evidence
                 score = None
             else:
                 samples = await self.repository.list_samples(
@@ -526,27 +617,9 @@ class GuardianEngine:
                 healthy_since = None
                 fused_until = None
 
+            # Warmup and staleness are decided inside the state machine so a
+            # fresh failure is never short-circuited into WARMING_UP/STALE.
             decision = scope_decision
-            if decision is None and assessment is not None and assessment.warming_up:
-                decision = ChannelDecision(
-                    health=GuardianHealth.WARMING_UP,
-                    should_schedule=entry.upstream_schedulable,
-                    should_probe=False,
-                    can_auto_recover=False,
-                    reason="warming_up",
-                )
-            if (
-                decision is None
-                and assessment is not None
-                and assessment.freshness is not GuardianFreshness.FRESH
-            ):
-                decision = ChannelDecision(
-                    health=GuardianHealth.STALE,
-                    should_schedule=entry.upstream_schedulable,
-                    should_probe=False,
-                    can_auto_recover=False,
-                    reason=f"evidence_{assessment.freshness.value.casefold()}",
-                )
             if decision is None:
                 fatal_confirmed = any(
                     item.event_type is GuardianEventType.FATAL

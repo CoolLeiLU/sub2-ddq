@@ -55,6 +55,23 @@ class AccountRecoveryOperations(Protocol):
     ) -> GuardianAccountMutationOutcome: ...
 
 
+def _uses_retry_cooldown(trigger: AccountRecoveryRunTrigger) -> bool:
+    """Whether a run must skip accounts probed inside the retry cooldown.
+
+    Channel errors used to be rare, so the cooldown was skipped for them and
+    every account was re-probed on each new episode.  A degraded channel can
+    stay degraded for hours and now reopens an episode on every snapshot, so
+    it must honour the cooldown too; a manual run is an explicit operator
+    action and bypasses it.
+    """
+
+    return trigger in {
+        AccountRecoveryRunTrigger.BAD_ACCOUNT_STATE,
+        AccountRecoveryRunTrigger.CHANNEL_ERROR,
+        AccountRecoveryRunTrigger.HOURLY_ACTIVE_CHECK,
+    }
+
+
 def _classification(
     account: GuardianAccountObservation,
     *,
@@ -328,11 +345,7 @@ class AccountRecoveryExecutor:
                 await self._repository.list_recent_tested_account_ids(
                     since=started_at - timedelta(seconds=cooldown_seconds)
                 )
-                if trigger
-                in {
-                    AccountRecoveryRunTrigger.BAD_ACCOUNT_STATE,
-                    AccountRecoveryRunTrigger.HOURLY_ACTIVE_CHECK,
-                }
+                if _uses_retry_cooldown(trigger)
                 else frozenset[str]()
             )
             observations = await self._repository.list_account_observations(snapshot_id)

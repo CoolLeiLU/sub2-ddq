@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import uuid
 from collections.abc import Callable
@@ -369,6 +370,26 @@ def _snapshot_id(value: str) -> str:
     if len(normalized) != 64 or invalid_character:
         raise ValueError("snapshot ID must be a SHA-256 hex digest")
     return normalized
+
+
+def _evidence_sample_key(
+    channel_id: str,
+    source: GuardianSampleSource,
+    source_event_id: str,
+) -> str:
+    """Return the deterministic primary key for one evidence observation.
+
+    ``append_evidence`` used a random UUID, so ``ON CONFLICT(sample_id)``
+    could never fire and every scheduler cycle inserted another copy of the
+    same upstream observation.  Fusing dozens of identical rows both inflated
+    the evidence set and made bucket counts meaningless.  Hashing the
+    observation's own identity makes the insert idempotent; ``channel_id`` and
+    ``source`` are included so two sources that happen to share an event ID
+    stay distinct.
+    """
+
+    material = "\x00".join((channel_id, source.value, source_event_id))
+    return hashlib.sha256(material.encode()).hexdigest()
 
 
 def _cursor(created_at: datetime, item_id: str) -> str:
@@ -1701,7 +1722,11 @@ class GuardianRepository:
                 "status_code, message, source_event_id, bucket_at, reliability, ingested_at, "
                 "legacy) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, FALSE) "
                 "ON CONFLICT(sample_id) DO NOTHING",
-                str(uuid.uuid4()),
+                _evidence_sample_key(
+                    evidence.channel_id,
+                    evidence.source,
+                    evidence.source_event_id,
+                ),
                 evidence.channel_id,
                 evidence.source.value,
                 evidence.event_type.value,

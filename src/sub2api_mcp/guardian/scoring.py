@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import statistics
 from collections.abc import Sequence
 from datetime import datetime
 
@@ -92,6 +93,64 @@ def _bounded_score(value: float) -> float:
     return max(0.0, min(100.0, value))
 
 
+def effective_observation_windows(sampling: SamplingPolicy) -> tuple[int, int]:
+    """Return the (fresh, expire) windows in seconds for this cadence.
+
+    ``fresh_seconds`` and ``expire_seconds`` are operator floors.  The
+    published cadence is what actually determines how often new evidence can
+    arrive, so a window narrower than two observation windows would expire
+    evidence that is still the newest upstream truth.  Widening here keeps a
+    slow monitor usable without weakening an explicitly larger policy.
+    """
+
+    fresh = max(
+        sampling.fresh_seconds,
+        sampling.observation_window_seconds,
+    )
+    expire = max(
+        sampling.expire_seconds,
+        fresh * 2,
+    )
+    return fresh, expire
+
+
+def _observation_cadence_seconds(
+    buckets: Sequence[GuardianEvidenceBucket],
+    *,
+    bucket_seconds: int,
+) -> int:
+    """Return the typical spacing between this channel's observations.
+
+    Warmup coverage used to be a bucket count inside the short window.  A
+    monitor that re-checks every 20 minutes produces at most one bucket in a
+    10-minute short window, so the count could never be reached and live
+    channels stayed in WARMING_UP forever.  Coverage is now measured in
+    observation windows, and the cadence comes from the evidence itself so a
+    channel served by a slow monitor still accumulates history.
+    """
+
+    if len(buckets) < 2:
+        return bucket_seconds
+    times = sorted({bucket.bucket_at for bucket in buckets}, reverse=True)
+    gaps = [
+        int((times[index] - times[index + 1]).total_seconds())
+        for index in range(len(times) - 1)
+    ]
+    gaps = [gap for gap in gaps if gap >= bucket_seconds]
+    if not gaps:
+        return bucket_seconds
+    return max(bucket_seconds, int(statistics.median(gaps)))
+
+
+def _warmup_span_seconds(buckets: Sequence[GuardianEvidenceBucket]) -> int:
+    """Return the observed history span used for the warmup decision."""
+
+    if not buckets:
+        return 0
+    times = sorted(bucket.bucket_at for bucket in buckets)
+    return max(0, int((times[-1] - times[0]).total_seconds()))
+
+
 def calculate_health_score_v2(
     buckets: Sequence[GuardianEvidenceBucket],
     *,
@@ -168,14 +227,24 @@ def calculate_health_score_v2(
 
     latest_evidence_at = max(bucket_times)
     latest_age_seconds = (now - latest_evidence_at).total_seconds()
-    if latest_age_seconds <= sampling_policy.fresh_seconds:
+    fresh_window, expire_window = effective_observation_windows(sampling_policy)
+    if latest_age_seconds <= fresh_window:
         freshness = GuardianFreshness.FRESH
-    elif latest_age_seconds <= sampling_policy.expire_seconds:
+    elif latest_age_seconds <= expire_window:
         freshness = GuardianFreshness.STALE
     else:
         freshness = GuardianFreshness.EXPIRED
 
-    coverage = min(1.0, len(short_buckets) / sampling_policy.min_warmup_buckets)
+    # Coverage is measured in observation windows of history, not bucket
+    # count; see ``_observation_cadence_seconds``.  A single fresh
+    # observation is still not enough to fuse or degrade a channel.
+    cadence_seconds = _observation_cadence_seconds(
+        long_buckets,
+        bucket_seconds=sampling_policy.bucket_seconds,
+    )
+    observed_span = _warmup_span_seconds(long_buckets)
+    required_warmup_span = cadence_seconds * sampling_policy.min_warmup_buckets
+    coverage = min(1.0, observed_span / required_warmup_span)
     quality_weights = [
         math.pow(
             2,
@@ -196,7 +265,7 @@ def calculate_health_score_v2(
     )
     freshness_factor = math.pow(
         2,
-        -latest_age_seconds / sampling_policy.fresh_seconds,
+        -latest_age_seconds / fresh_window,
     )
     confidence = max(
         0.0,
@@ -210,5 +279,9 @@ def calculate_health_score_v2(
         freshness=freshness,
         evidence_bucket_count=len(long_buckets),
         last_evidence_at=latest_evidence_at,
-        warming_up=len(short_buckets) < sampling_policy.min_warmup_buckets,
+        warming_up=(
+            observed_span < required_warmup_span
+            or len(long_buckets) < 2
+            or len(short_buckets) < 1
+        ),
     )

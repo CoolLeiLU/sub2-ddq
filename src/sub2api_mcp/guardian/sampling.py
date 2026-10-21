@@ -111,14 +111,18 @@ def fuse_evidence_buckets(
     )
     sources: dict[tuple[str, datetime], set[GuardianSampleSource]] = defaultdict(set)
 
-    by_source: dict[tuple[str, datetime, GuardianSampleSource], list[GuardianEvidence]] = (
-        defaultdict(list)
+    by_source: dict[tuple[str, datetime, GuardianSampleSource], dict[str, GuardianEvidence]] = (
+        defaultdict(dict)
     )
     for item in evidence:
         by_source[
             (item.channel_id, _bucket_at(item.occurred_at, bucket_seconds), item.source)
-        ].append(item)
-    for (channel_id, bucket_at, source), values in by_source.items():
+        ].setdefault(item.source_event_id, item)
+    # A monitor read may be replayed across scheduler cycles.  Each distinct
+    # observation counts once per bucket; reuse of the same event ID inside a
+    # bucket is the same observation, not extra evidence.
+    for (channel_id, bucket_at, source), values_by_id in by_source.items():
+        values = list(values_by_id.values())
         reliability = max(value.reliability for value in values)
         grouped[(channel_id, bucket_at)].append(
             (

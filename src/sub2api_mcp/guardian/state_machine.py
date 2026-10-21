@@ -79,13 +79,31 @@ def decide_channel_state(value: ChannelDecisionInput) -> ChannelDecision:
         )
 
     if value.warming_up:
-        return ChannelDecision(
-            health=GuardianHealth.WARMING_UP,
-            should_schedule=value.schedulable,
-            should_probe=False,
-            can_auto_recover=False,
-            reason="warming_up",
+        # Warmup means "not enough history to judge", not "ignore what we do
+        # see".  A fresh observation that already shows an unusable channel
+        # (a hard failure, or latency failures in the recent window) must
+        # still leave the serving pool; only the healthy and unknown cases
+        # wait for more history.  Latency-driven degradation is excluded from
+        # the bypass so a slow-but-working channel keeps serving traffic.
+        fatal_now = value.fatal_confirmed and GuardianEventType.FATAL in value.recent_events[:1]
+        failures_now = any(
+            event
+            in {
+                GuardianEventType.GATEWAY_ERROR,
+                GuardianEventType.QUOTA_EXHAUSTED,
+                GuardianEventType.PROBE_FAIL,
+                GuardianEventType.UPSTREAM_UNKNOWN,
+            }
+            for event in value.recent_events[:1]
         )
+        if not (fatal_now or failures_now):
+            return ChannelDecision(
+                health=GuardianHealth.WARMING_UP,
+                should_schedule=value.schedulable,
+                should_probe=False,
+                can_auto_recover=False,
+                reason="warming_up",
+            )
     if value.freshness is not GuardianFreshness.FRESH:
         return ChannelDecision(
             health=GuardianHealth.STALE,
